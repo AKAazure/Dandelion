@@ -122,15 +122,20 @@ function run() {
 
   assert.deepStrictEqual(requestSeenMissing, []);
   assert.strictEqual(requestSeenSession.getSnapshot().phase, DICTATION_PHASES.WAITING_RESPONSE);
+  assert.strictEqual(requestSeenSession.getSnapshot().observedTranscribeRequestId, 'abc');
 
   requestSeenSession.reset();
   assert.strictEqual(requestSeenSession.getSnapshot().phase, DICTATION_PHASES.IDLE);
+  assert.strictEqual(requestSeenSession.getSnapshot().observedTranscribeRequestId, '');
 
   assert.strictEqual(calculateTranscribeRequestTimeoutMs(0), 15000);
-  assert.strictEqual(calculateTranscribeRequestTimeoutMs(113122), 61921);
-  assert.strictEqual(calculateTranscribeRequestTimeoutMs(150000), 97500);
-  assert.strictEqual(calculateTranscribeRequestTimeoutMs(160766), 109768);
-  assert.strictEqual(calculateTranscribeRequestTimeoutMs(600000), 120000);
+  assert.strictEqual(calculateTranscribeRequestTimeoutMs(30000), 45000);
+  assert.strictEqual(calculateTranscribeRequestTimeoutMs(60989), 75989);
+  assert.strictEqual(calculateTranscribeRequestTimeoutMs(85563), 100563);
+  assert.strictEqual(calculateTranscribeRequestTimeoutMs(113122), 128122);
+  assert.strictEqual(calculateTranscribeRequestTimeoutMs(150000), 165000);
+  assert.strictEqual(calculateTranscribeRequestTimeoutMs(160766), 175766);
+  assert.strictEqual(calculateTranscribeRequestTimeoutMs(600000), 615000);
   assert.strictEqual(calculateTranscribeRequestTimeoutMs(150000, {
     baseTimeoutMs: 0
   }), 0);
@@ -149,9 +154,9 @@ function run() {
   dynamicSession.markStartShortcutSent();
   nowMs += 150000;
   assert.strictEqual(dynamicSession.markStopShortcutSent(), true);
-  assert.strictEqual(dynamicTimers.getLatestTimeoutMs(), 97500);
+  assert.strictEqual(dynamicTimers.getLatestTimeoutMs(), 165000);
   assert.strictEqual(dynamicSession.getSnapshot().listeningDurationMs, 150000);
-  assert.strictEqual(dynamicSession.getSnapshot().transcribeRequestTimeoutMs, 97500);
+  assert.strictEqual(dynamicSession.getSnapshot().transcribeRequestTimeoutMs, 165000);
 }
 
 module.exports = {

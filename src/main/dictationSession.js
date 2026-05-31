@@ -2,9 +2,6 @@
 
 const DEFAULT_START_CONFIRMATION_MS = 1500;
 const DEFAULT_TRANSCRIBE_REQUEST_TIMEOUT_MS = 15000;
-const DEFAULT_TRANSCRIBE_REQUEST_TIMEOUT_MAX_MS = 120000;
-const DEFAULT_TRANSCRIBE_REQUEST_TIMEOUT_SCALE_MS = 30000;
-const DEFAULT_TRANSCRIBE_REQUEST_TIMEOUT_CURVE_MS = 3300;
 const DEFAULT_MAX_START_RETRIES = 1;
 
 const DICTATION_PHASES = {
@@ -35,23 +32,11 @@ function readNonNegativeInt(value, fallback) {
   return Math.floor(parsed);
 }
 
-function readPositiveInt(value, fallback) {
-  const parsed = Number(value);
-
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    return fallback;
-  }
-
-  return Math.floor(parsed);
-}
-
 /**
  * 按听写时长计算 stop 后等待 transcribe request 的 timeout。
  *
- * 短听写保持接近 base timeout；长听写按时长平方增加等待时间，
- * 让 ChatGPT 处理长音频时有更多时间发出 request。当前曲线系数基于
- * 2026-05-31 两次 late-request 样本反推，保证 113s / 161s 听写的默认
- * timeout 都比当时实际 request-start 延迟多出至少 50%。
+ * 默认策略是“基础 buffer + 实际录音时长”。
+ * 这让 timeout 规则更直白：录得越久，stop 后等待 request 的时间就线性增加。
  *
  * @param {number} listeningDurationMs 本轮听写持续时间。
  * @param {object} [options] timeout 参数。
@@ -68,22 +53,8 @@ function calculateTranscribeRequestTimeoutMs(listeningDurationMs, options) {
     return 0;
   }
 
-  const maxTimeoutMs = Math.max(baseTimeoutMs, readNonNegativeInt(
-    settings.maxTimeoutMs,
-    DEFAULT_TRANSCRIBE_REQUEST_TIMEOUT_MAX_MS
-  ));
-  const scaleMs = readPositiveInt(
-    settings.scaleMs,
-    DEFAULT_TRANSCRIBE_REQUEST_TIMEOUT_SCALE_MS
-  );
-  const curveMs = readPositiveInt(
-    settings.curveMs,
-    DEFAULT_TRANSCRIBE_REQUEST_TIMEOUT_CURVE_MS
-  );
   const durationMs = readNonNegativeInt(listeningDurationMs, 0);
-  const dynamicExtraMs = Math.round(Math.pow(durationMs / scaleMs, 2) * curveMs);
-
-  return Math.min(maxTimeoutMs, baseTimeoutMs + dynamicExtraMs);
+  return baseTimeoutMs + durationMs;
 }
 
 /**
@@ -108,14 +79,6 @@ function createDictationSession(options) {
     settings.transcribeRequestTimeoutMs,
     DEFAULT_TRANSCRIBE_REQUEST_TIMEOUT_MS
   );
-  const transcribeRequestTimeoutMaxMs = readNonNegativeInt(
-    settings.transcribeRequestTimeoutMaxMs,
-    DEFAULT_TRANSCRIBE_REQUEST_TIMEOUT_MAX_MS
-  );
-  const transcribeRequestTimeoutScaleMs = readPositiveInt(
-    settings.transcribeRequestTimeoutScaleMs,
-    DEFAULT_TRANSCRIBE_REQUEST_TIMEOUT_SCALE_MS
-  );
   const maxStartRetries = readNonNegativeInt(
     settings.maxStartRetries,
     DEFAULT_MAX_START_RETRIES
@@ -130,6 +93,7 @@ function createDictationSession(options) {
   let listeningStartedAtMs = null;
   let lastListeningDurationMs = 0;
   let activeTranscribeRequestTimeoutMs = transcribeRequestTimeoutMs;
+  let observedTranscribeRequestId = '';
 
   function clearStartConfirmationTimer() {
     if (startConfirmationTimer) {
@@ -150,6 +114,7 @@ function createDictationSession(options) {
       listeningDurationMs: getListeningDurationMs(),
       mediaRequestSeen: mediaRequestSeen,
       phase: phase,
+      observedTranscribeRequestId: observedTranscribeRequestId,
       startRetryCount: startRetryCount,
       transcribeRequestSeen: transcribeRequestSeen,
       transcribeRequestTimeoutMs: activeTranscribeRequestTimeoutMs
@@ -241,6 +206,7 @@ function createDictationSession(options) {
     listeningStartedAtMs = null;
     lastListeningDurationMs = 0;
     activeTranscribeRequestTimeoutMs = transcribeRequestTimeoutMs;
+    observedTranscribeRequestId = '';
   }
 
   return {
@@ -279,6 +245,7 @@ function createDictationSession(options) {
       listeningStartedAtMs = nowFn();
       lastListeningDurationMs = 0;
       activeTranscribeRequestTimeoutMs = transcribeRequestTimeoutMs;
+      observedTranscribeRequestId = '';
       logger.info('dictation.start.sent_waiting_for_media_request', {
         startConfirmationMs: startConfirmationMs,
         startRetryCount: startRetryCount
@@ -330,13 +297,12 @@ function createDictationSession(options) {
       activeTranscribeRequestTimeoutMs = calculateTranscribeRequestTimeoutMs(
         lastListeningDurationMs,
         {
-          baseTimeoutMs: transcribeRequestTimeoutMs,
-          maxTimeoutMs: transcribeRequestTimeoutMaxMs,
-          scaleMs: transcribeRequestTimeoutScaleMs
+          baseTimeoutMs: transcribeRequestTimeoutMs
         }
       );
       phase = DICTATION_PHASES.PROCESSING;
       transcribeRequestSeen = false;
+      observedTranscribeRequestId = '';
       logger.info('dictation.stop.sent_waiting_for_transcribe_request', {
         listeningDurationMs: lastListeningDurationMs,
         timeoutMs: activeTranscribeRequestTimeoutMs
@@ -365,9 +331,10 @@ function createDictationSession(options) {
 
       transcribeRequestSeen = true;
       phase = DICTATION_PHASES.WAITING_RESPONSE;
+      observedTranscribeRequestId = String((payload && payload.requestId) || '').trim();
       clearTranscribeRequestTimer();
       logger.info('dictation.transcribe_request.observed', {
-        requestId: payload && payload.requestId
+        requestId: observedTranscribeRequestId
       });
       return true;
     },
@@ -384,9 +351,7 @@ function createDictationSession(options) {
 module.exports = {
   DEFAULT_MAX_START_RETRIES: DEFAULT_MAX_START_RETRIES,
   DEFAULT_START_CONFIRMATION_MS: DEFAULT_START_CONFIRMATION_MS,
-  DEFAULT_TRANSCRIBE_REQUEST_TIMEOUT_MAX_MS: DEFAULT_TRANSCRIBE_REQUEST_TIMEOUT_MAX_MS,
   DEFAULT_TRANSCRIBE_REQUEST_TIMEOUT_MS: DEFAULT_TRANSCRIBE_REQUEST_TIMEOUT_MS,
-  DEFAULT_TRANSCRIBE_REQUEST_TIMEOUT_SCALE_MS: DEFAULT_TRANSCRIBE_REQUEST_TIMEOUT_SCALE_MS,
   DICTATION_PHASES: DICTATION_PHASES,
   calculateTranscribeRequestTimeoutMs: calculateTranscribeRequestTimeoutMs,
   createDictationSession: createDictationSession

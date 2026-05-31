@@ -39,7 +39,10 @@ const {
   normalizeMiniOverlayState,
   shouldFocusMiniOverlay
 } = require('./miniOverlayState');
-const { createDictationSession } = require('./dictationSession');
+const {
+  createDictationSession,
+  DICTATION_PHASES
+} = require('./dictationSession');
 const {
   captureForegroundWindow,
   restoreForegroundWindow
@@ -835,6 +838,20 @@ function registerTranscriptPipeline() {
       return;
     }
 
+    const sessionSnapshot = dictationSession.getSnapshot();
+
+    if (
+      sessionSnapshot.phase !== DICTATION_PHASES.PROCESSING &&
+      sessionSnapshot.phase !== DICTATION_PHASES.WAITING_RESPONSE
+    ) {
+      logger.debug('transcript.dom.ignored_unexpected_phase', {
+        phase: sessionSnapshot.phase,
+        source: payload && payload.source,
+        textLength: String((payload && payload.text) || '').length
+      });
+      return;
+    }
+
     logger.debug('transcript.dom.received', {
       source: payload && payload.source,
       textLength: String((payload && payload.text) || '').length
@@ -847,8 +864,28 @@ function installTranscribeMonitor() {
   transcribeMonitor = createChatGptTranscribeMonitor({
     logger: logger,
     onFailed: function onTranscribeFailed(payload) {
-      if (miniOverlayState !== MINI_OVERLAY_STATES.PROCESSING || !transcriptResultEnabled) {
+      if (!transcriptResultEnabled) {
         logger.debug('transcribe.failed_ignored_inactive', {
+          statusCode: payload && payload.statusCode,
+          statusText: payload && payload.statusText,
+          url: payload && payload.url
+        });
+        return;
+      }
+
+      const sessionSnapshot = dictationSession.getSnapshot();
+      const requestId = String((payload && payload.requestId) || '').trim();
+
+      if (
+        miniOverlayState !== MINI_OVERLAY_STATES.PROCESSING ||
+        sessionSnapshot.phase !== DICTATION_PHASES.WAITING_RESPONSE ||
+        !requestId ||
+        requestId !== sessionSnapshot.observedTranscribeRequestId
+      ) {
+        logger.debug('transcribe.failed_ignored_unmatched_session', {
+          observedRequestId: sessionSnapshot.observedTranscribeRequestId,
+          phase: sessionSnapshot.phase,
+          requestId: requestId,
           statusCode: payload && payload.statusCode,
           statusText: payload && payload.statusText,
           url: payload && payload.url
@@ -858,6 +895,7 @@ function installTranscribeMonitor() {
 
       logger.error('transcribe.failed', {
         errorText: payload.errorText,
+        requestId: requestId,
         statusCode: payload.statusCode,
         statusText: payload.statusText,
         url: payload.url
@@ -881,6 +919,26 @@ function installTranscribeMonitor() {
     onSucceeded: function onTranscribeSucceeded(payload) {
       if (!transcriptResultEnabled) {
         logger.debug('transcribe.succeeded_ignored_inactive', {
+          requestId: payload && payload.requestId,
+          statusCode: payload && payload.statusCode,
+          textLength: String((payload && payload.text) || '').length,
+          url: payload && payload.url
+        });
+        return;
+      }
+
+      const sessionSnapshot = dictationSession.getSnapshot();
+      const requestId = String((payload && payload.requestId) || '').trim();
+
+      if (
+        sessionSnapshot.phase !== DICTATION_PHASES.WAITING_RESPONSE ||
+        !requestId ||
+        requestId !== sessionSnapshot.observedTranscribeRequestId
+      ) {
+        logger.debug('transcribe.succeeded_ignored_unmatched_session', {
+          observedRequestId: sessionSnapshot.observedTranscribeRequestId,
+          phase: sessionSnapshot.phase,
+          requestId: requestId,
           statusCode: payload && payload.statusCode,
           textLength: String((payload && payload.text) || '').length,
           url: payload && payload.url
@@ -890,6 +948,7 @@ function installTranscribeMonitor() {
 
       if (!payload || !payload.text) {
         logger.warn('transcribe.succeeded_without_text', {
+          requestId: requestId,
           statusCode: payload && payload.statusCode,
           url: payload && payload.url
         });
@@ -897,6 +956,7 @@ function installTranscribeMonitor() {
       }
 
       logger.info('transcribe.succeeded', {
+        requestId: requestId,
         statusCode: payload.statusCode,
         textLength: String(payload.text || '').length,
         url: payload.url
