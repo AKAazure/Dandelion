@@ -2,8 +2,9 @@
 
 const DEFAULT_START_CONFIRMATION_MS = 1500;
 const DEFAULT_TRANSCRIBE_REQUEST_TIMEOUT_MS = 15000;
-const DEFAULT_TRANSCRIBE_REQUEST_TIMEOUT_MAX_MS = 60000;
+const DEFAULT_TRANSCRIBE_REQUEST_TIMEOUT_MAX_MS = 120000;
 const DEFAULT_TRANSCRIBE_REQUEST_TIMEOUT_SCALE_MS = 30000;
+const DEFAULT_TRANSCRIBE_REQUEST_TIMEOUT_CURVE_MS = 3300;
 const DEFAULT_MAX_START_RETRIES = 1;
 
 const DICTATION_PHASES = {
@@ -48,7 +49,9 @@ function readPositiveInt(value, fallback) {
  * 按听写时长计算 stop 后等待 transcribe request 的 timeout。
  *
  * 短听写保持接近 base timeout；长听写按时长平方增加等待时间，
- * 让 ChatGPT 处理长音频时有更多时间发出 request。
+ * 让 ChatGPT 处理长音频时有更多时间发出 request。当前曲线系数基于
+ * 2026-05-31 两次 late-request 样本反推，保证 113s / 161s 听写的默认
+ * timeout 都比当时实际 request-start 延迟多出至少 50%。
  *
  * @param {number} listeningDurationMs 本轮听写持续时间。
  * @param {object} [options] timeout 参数。
@@ -73,8 +76,12 @@ function calculateTranscribeRequestTimeoutMs(listeningDurationMs, options) {
     settings.scaleMs,
     DEFAULT_TRANSCRIBE_REQUEST_TIMEOUT_SCALE_MS
   );
+  const curveMs = readPositiveInt(
+    settings.curveMs,
+    DEFAULT_TRANSCRIBE_REQUEST_TIMEOUT_CURVE_MS
+  );
   const durationMs = readNonNegativeInt(listeningDurationMs, 0);
-  const dynamicExtraMs = Math.round(Math.pow(durationMs / scaleMs, 2) * 1000);
+  const dynamicExtraMs = Math.round(Math.pow(durationMs / scaleMs, 2) * curveMs);
 
   return Math.min(maxTimeoutMs, baseTimeoutMs + dynamicExtraMs);
 }

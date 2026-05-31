@@ -127,8 +127,10 @@ function run() {
   assert.strictEqual(requestSeenSession.getSnapshot().phase, DICTATION_PHASES.IDLE);
 
   assert.strictEqual(calculateTranscribeRequestTimeoutMs(0), 15000);
-  assert.strictEqual(calculateTranscribeRequestTimeoutMs(150000), 40000);
-  assert.strictEqual(calculateTranscribeRequestTimeoutMs(600000), 60000);
+  assert.strictEqual(calculateTranscribeRequestTimeoutMs(113122), 61921);
+  assert.strictEqual(calculateTranscribeRequestTimeoutMs(150000), 97500);
+  assert.strictEqual(calculateTranscribeRequestTimeoutMs(160766), 109768);
+  assert.strictEqual(calculateTranscribeRequestTimeoutMs(600000), 120000);
   assert.strictEqual(calculateTranscribeRequestTimeoutMs(150000, {
     baseTimeoutMs: 0
   }), 0);
@@ -147,9 +149,9 @@ function run() {
   dynamicSession.markStartShortcutSent();
   nowMs += 150000;
   assert.strictEqual(dynamicSession.markStopShortcutSent(), true);
-  assert.strictEqual(dynamicTimers.getLatestTimeoutMs(), 40000);
+  assert.strictEqual(dynamicTimers.getLatestTimeoutMs(), 97500);
   assert.strictEqual(dynamicSession.getSnapshot().listeningDurationMs, 150000);
-  assert.strictEqual(dynamicSession.getSnapshot().transcribeRequestTimeoutMs, 40000);
+  assert.strictEqual(dynamicSession.getSnapshot().transcribeRequestTimeoutMs, 97500);
 }
 
 module.exports = {

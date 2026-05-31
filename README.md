@@ -54,7 +54,7 @@ npm start
 
 听写中或处理中按 `Escape` 会取消本轮听写：app 会把 `Escape` 发送给 ChatGPT 页面，清空当前输入栏，丢弃本轮候选文本和后续返回的 transcribe response，不复制、不粘贴、不保存。`Escape` 平时不会作为全局快捷键注册，避免影响游戏或其他应用。
 
-听写完成确认优先监听 ChatGPT 页面实际发出的 transcribe request。app 会通过 Electron CDP Network 读取 response body，解析到最终文本后立即复制、保存和粘贴；如果 network monitor 不可用，仍会 fallback 到 DOM 观察器。DOM 路径不会在页面一变化就复制，而是默认等待文本稳定 `2500ms` 后才当成完成结果处理。完成后 app 会：
+听写完成确认优先监听 ChatGPT 页面实际发出的 transcribe request。app 会通过 Electron CDP Network 读取 response body，解析到最终文本后立即复制、保存和粘贴；如果 network monitor 不可用，仍会 fallback 到 DOM 观察器。DOM 路径不会在页面一变化就复制，而是默认等待文本稳定 `2500ms` 后才当成完成结果处理。日志里 `transcribe.succeeded` 表示 network monitor 已经拿到 ChatGPT 的 transcribe response 并解析出文本；`transcript.finalized` 表示这段文本已经经过本地 pipeline，写入剪贴板、保存到 `last-transcript.json`，并在开启自动粘贴时发出粘贴。完成后 app 会：
 
 - 自动复制到剪贴板。
 - 保存到 `.runtime/dandelion-electron/last-transcript.json`。
@@ -62,7 +62,7 @@ npm start
 - 启动时把上次完成结果恢复到剪贴板。
 - 托盘菜单支持“复制上次听写到剪贴板”。
 
-结束听写只会在 app 已经处于 `listening` session 时发送；如果当前不是 listening，stop 会被跳过，避免同一个 `Ctrl+Shift+D` toggle 反向启动网页听写。结束听写后 overlay 会进入“处理中”。app 会按本轮听写时长动态等待 ChatGPT 发出 transcribe request：默认 `15s + (listeningDuration / 30s)^2 * 1s`，上限 `60s`，所以 `150s` 听写会等待 `40s`。一旦已经看到 request，app 不再用固定时间限制 response，而是继续等待 network response、DOM fallback、用户取消或明确失败。
+结束听写只会在 app 已经处于 `listening` session 时发送；如果当前不是 listening，stop 会被跳过，避免同一个 `Ctrl+Shift+D` toggle 反向启动网页听写。结束听写后 overlay 会进入“处理中”。app 会按本轮听写时长动态等待 ChatGPT 发出 transcribe request：默认 `15s + (listeningDuration / 30s)^2 * 3.3s`，上限 `120s`，所以 `113s` 听写会等待约 `61.9s`，`150s` 听写会等待 `97.5s`，`161s` 听写会等待约 `109.8s`。这个系数是按近期两次 late-request 样本反推的，默认都比当时实际 request-start 延迟多出至少 `50%`。一旦已经看到 request，app 不再用固定时间限制 response，而是继续等待 network response、DOM fallback、用户取消或明确失败。
 
 app 会默认写本地日志到 `.runtime/dandelion-electron/logs/app-YYYY-MM-DD.log`。日志用于排查快捷键、窗口、权限、transcribe request、overlay、提示音和 pipeline 状态；默认级别是 `info`，不会记录常规 permission 细节。需要深挖时可以把 `logging.level` 改成 `debug`。日志默认不记录 transcript 原文，只记录文本长度，默认保留 7 天，托盘菜单里可以直接打开日志目录。
 

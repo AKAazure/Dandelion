@@ -17,16 +17,16 @@
 - `startConfirmationMs`：等待 ChatGPT media request 的时长，默认 `1500`。
 - `transcribeRequestTimeoutMs`：stop 后等待 transcribe request 的基础时长，默认 `15000`。
 - `transcribeRequestTimeoutScaleMs`：动态 timeout 的时长 scale，默认 `30000`。
-- `transcribeRequestTimeoutMaxMs`：动态 timeout 上限，默认 `60000`。
+- `transcribeRequestTimeoutMaxMs`：动态 timeout 上限，默认 `120000`。
 - `maxStartRetries`：start 未确认时最多自动重试次数，默认 `1`。
 
 实际 request timeout 会按本轮听写时长动态计算：
 
 ```text
-timeout = min(maxTimeout, baseTimeout + (listeningDuration / scale)^2 * 1000ms)
+timeout = min(maxTimeout, baseTimeout + (listeningDuration / scale)^2 * 3300ms)
 ```
 
-默认配置下，短听写仍接近 `15s`；听写 `150s` 时 timeout 是 `40s`；超长听写最多等 `60s`。这个 timeout 仍然只判断“有没有看到 transcribe request”，不是 response timeout。
+默认配置下，短听写仍接近 `15s`；听写 `113s` 时 timeout 约 `61.9s`，听写 `150s` 时 timeout 是 `97.5s`，听写 `161s` 时 timeout 约 `109.8s`；超长听写最多等 `120s`。这个系数是按 2026-05-31 两次 late-request 样本反推的，默认都比当时实际 request-start 延迟多出至少 `50%`。这个 timeout 仍然只判断“有没有看到 transcribe request”，不是 response timeout。
 
 ### `markStartShortcutSent()`
 
@@ -47,6 +47,8 @@ timeout = min(maxTimeout, baseTimeout + (listeningDuration / scale)^2 * 1000ms)
 ### `markTranscribeRequestStarted(payload)`
 
 标记已经看到 ChatGPT 的 transcribe request。调用后会清理 request timeout，并进入 `waiting_response`。从这里开始不再用固定 15 秒限制 response。
+
+在日志语义上，`transcribe.succeeded` 表示 network monitor 已经拿到 ChatGPT 的 transcribe response 并解析出文本；`transcript.finalized` 表示这段文本已经经过本地 transcript pipeline，写入剪贴板、保存到 `last-transcript.json`，并在开启自动粘贴时发出粘贴。
 
 ### `reset()` / `cancel()`
 
