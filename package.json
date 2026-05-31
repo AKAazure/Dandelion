@@ -1,0 +1,59 @@
+{
+  "name": "dandelion",
+  "version": "0.1.0",
+  "description": "Dandelion is a Windows desktop STT helper that embeds ChatGPT and maps custom hotkeys to web dictation.",
+  "main": "src/main/main.js",
+  "private": true,
+  "scripts": {
+    "build:icons": "node scripts/buildWindowsIcon.js",
+    "dist:win": "node node_modules/electron-builder/cli.js --win portable --x64",
+    "pack:win": "node node_modules/electron-builder/cli.js --win dir --x64",
+    "predist:win": "npm run build:icons",
+    "prepack:win": "npm run build:icons",
+    "smoke": "electron . --start-mode=smart --smoke-test --disable-shortcuts --chatgpt-url=about:blank",
+    "start": "electron .",
+    "start:login": "electron . --start-mode=smart",
+    "test": "node tests/run-tests.js"
+  },
+  "build": {
+    "appId": "com.akazure.dandelion",
+    "productName": "Dandelion",
+    "asar": true,
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "assets/**/*",
+      "src/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "config",
+        "to": "config",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "icon": "assets/logo.ico",
+      "target": [
+        {
+          "target": "dir",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "portable": {
+      "artifactName": "${productName}-${version}-${arch}-portable.${ext}"
+    }
+  },
+  "devDependencies": {
+    "electron": "^42.1.0",
+    "electron-builder": "^26.8.1",
+    "pngjs": "^7.0.0"
+  }
+}

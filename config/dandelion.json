@@ -1,0 +1,20 @@
+{
+  "bindings": {
+    "start": "Alt+,",
+    "stop": "Alt+.",
+    "cancel": "Escape"
+  },
+  "targetChords": {
+    "start": "Ctrl+Shift+D",
+    "stop": "Ctrl+Shift+D",
+    "cancel": "Escape"
+  },
+  "logging": {
+    "enabled": true,
+    "level": "info",
+    "retentionDays": 7
+  },
+  "autoPasteTranscript": true,
+  "transcriptStableMs": 2500,
+  "startMode": "mini"
+}

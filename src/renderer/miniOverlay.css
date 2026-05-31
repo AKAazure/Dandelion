@@ -1,0 +1,232 @@
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  background: transparent;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  width: 100%;
+}
+
+body {
+  align-items: center;
+  display: flex;
+  font-family: "Segoe UI", Arial, sans-serif;
+  justify-content: center;
+}
+
+.mini-shell {
+  --level: 0;
+  align-items: center;
+  background:
+    linear-gradient(135deg, rgba(12, 18, 27, 0.92), rgba(23, 40, 43, 0.78)),
+    rgba(8, 12, 18, 0.84);
+  border: 1px solid rgba(176, 237, 255, 0.28);
+  border-radius: 28px;
+  box-shadow:
+    0 18px 42px rgba(0, 0, 0, 0.34),
+    inset 0 1px 0 rgba(255, 255, 255, 0.16);
+  box-sizing: border-box;
+  color: #eefcff;
+  cursor: grab;
+  display: grid;
+  gap: 14px;
+  grid-template-columns: 22px 1fr;
+  height: 68px;
+  outline: none;
+  padding: 12px 18px;
+  user-select: none;
+  width: 180px;
+}
+
+.mini-shell:hover {
+  border-color: rgba(209, 251, 255, 0.48);
+}
+
+.mini-shell[data-dragging="true"] {
+  cursor: grabbing;
+}
+
+.mini-shell[data-state="success"],
+.mini-shell[data-state="error"] {
+  align-content: start;
+  cursor: grab;
+  gap: 12px;
+  grid-template-columns: 34px 1fr;
+  height: 164px;
+  padding: 16px;
+  width: 324px;
+}
+
+.status-mark {
+  align-items: center;
+  display: flex;
+  height: 22px;
+  justify-content: center;
+  position: relative;
+  width: 22px;
+}
+
+.status-dot {
+  background: #9fb5c7;
+  border-radius: 50%;
+  box-shadow:
+    0 0 0 6px rgba(159, 181, 199, 0.11),
+    0 0 18px rgba(159, 181, 199, 0.28);
+  display: block;
+  height: 12px;
+  width: 12px;
+}
+
+.mini-shell[data-state="listening"] .status-dot {
+  background: #54f0b6;
+  box-shadow:
+    0 0 0 6px rgba(84, 240, 182, 0.13),
+    0 0 22px rgba(84, 240, 182, 0.54);
+}
+
+.success-mark,
+.error-mark,
+.processing-spinner {
+  display: none;
+}
+
+.success-mark,
+.error-mark {
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.mini-shell[data-state="success"] .status-dot,
+.mini-shell[data-state="error"] .status-dot,
+.mini-shell[data-state="processing"] .status-dot {
+  display: none;
+}
+
+.mini-shell[data-state="success"] .success-mark {
+  color: #54f0b6;
+  display: block;
+}
+
+.mini-shell[data-state="error"] .error-mark {
+  color: #ffcf5b;
+  display: block;
+}
+
+.mini-shell[data-state="processing"] .processing-spinner {
+  animation: spin 880ms linear infinite;
+  border: 2px solid rgba(238, 252, 255, 0.26);
+  border-top-color: #66e6d0;
+  border-radius: 50%;
+  display: block;
+  height: 18px;
+  width: 18px;
+}
+
+.wave {
+  align-items: center;
+  display: none;
+  gap: 4px;
+  grid-template-columns: repeat(12, 1fr);
+  height: 42px;
+  min-width: 0;
+}
+
+.mini-shell[data-state="listening"] .wave {
+  display: grid;
+}
+
+.bar {
+  background: linear-gradient(180deg, #d8fcff 0%, #66e6d0 54%, #5a8cff 100%);
+  border-radius: 999px;
+  box-shadow: 0 0 12px rgba(102, 230, 208, 0.36);
+  display: block;
+  height: 100%;
+  min-height: 6px;
+  opacity: calc(0.42 + var(--level) * 0.52);
+  transform: scaleY(0.12);
+  transform-origin: center;
+  transition: opacity 120ms linear, transform 80ms linear;
+}
+
+.processing-label {
+  color: #c7d7e0;
+  display: none;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.mini-shell[data-state="processing"] .processing-label {
+  display: block;
+}
+
+.result-panel {
+  display: none;
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
+.mini-shell[data-state="success"] .result-panel,
+.mini-shell[data-state="error"] .result-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.result-text {
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(219, 245, 255, 0.16);
+  border-radius: 10px;
+  box-sizing: border-box;
+  color: #f5fdff;
+  font-size: 13px;
+  line-height: 1.42;
+  max-height: 78px;
+  min-height: 58px;
+  overflow: auto;
+  padding: 8px 10px;
+  user-select: text;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.mini-shell[data-state="error"] .result-text {
+  color: #ffe8a3;
+}
+
+.result-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.result-button {
+  background: rgba(238, 252, 255, 0.12);
+  border: 1px solid rgba(238, 252, 255, 0.18);
+  border-radius: 8px;
+  color: #eefcff;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  height: 28px;
+  min-width: 54px;
+  padding: 0 10px;
+}
+
+.result-button:hover {
+  background: rgba(238, 252, 255, 0.18);
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}

@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; media-src 'self' blob:; connect-src 'self';"
+    >
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Dandelion Mini</title>
+    <link rel="stylesheet" href="./miniOverlay.css">
+  </head>
+  <body>
+    <section id="shell" class="mini-shell" role="button" aria-label="Dandelion">
+      <span class="status-mark" aria-hidden="true">
+        <span class="status-dot"></span>
+        <span class="success-mark">√</span>
+        <span class="error-mark">!</span>
+        <span class="processing-spinner"></span>
+      </span>
+      <span class="wave" aria-hidden="true">
+        <span class="bar"></span>
+        <span class="bar"></span>
+        <span class="bar"></span>
+        <span class="bar"></span>
+        <span class="bar"></span>
+        <span class="bar"></span>
+        <span class="bar"></span>
+        <span class="bar"></span>
+        <span class="bar"></span>
+        <span class="bar"></span>
+        <span class="bar"></span>
+        <span class="bar"></span>
+      </span>
+      <span class="processing-label">处理中</span>
+      <div class="result-panel">
+        <div id="resultText" class="result-text" tabindex="0"></div>
+        <div class="result-actions">
+          <button id="copyButton" class="result-button" type="button">复制</button>
+          <button id="openButton" class="result-button" type="button">打开</button>
+        </div>
+      </div>
+    </section>
+    <script src="./miniOverlay.js"></script>
+  </body>
+</html>
