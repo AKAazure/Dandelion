@@ -66,6 +66,9 @@ const { pasteTextIntoForeground } = require('./windowsPaste');
 const config = loadAppConfig();
 const appRoot = path.join(__dirname, '..', '..');
 const appIconPath = resolveAppIconPath(appRoot);
+const DEFERRED_STOP_AFTER_START_MS = 160;
+const NETWORK_TRANSCRIPT_FALLBACK_MS = 5000;
+const START_READY_TIMEOUT_MS = 1000;
 const logger = createAppLogger({
   console: console,
   enabled: config.logging.enabled,
@@ -80,15 +83,21 @@ let tray = null;
 let shortcutBridges = [];
 let cancelShortcutBridge = null;
 let startShortcutBridge = null;
+let stopShortcutBridge = null;
 let transcriptPipeline = null;
 let transcribeMonitor = null;
 let currentMode = config.startMode;
 let miniOverlayState = MINI_OVERLAY_STATES.IDLE;
 let transcriptResultEnabled = false;
 let miniOverlayDragContext = null;
+let startShortcutPending = false;
+let stopAfterPendingStart = false;
+let networkTranscriptFallbackTimer = null;
+let pendingNetworkTranscript = null;
 const dictationSession = createDictationSession({
   logger: logger,
   onMissingTranscribeRequest: function onMissingTranscribeRequest() {
+    clearNetworkTranscriptFallback();
     sendMiniOverlayDictationState(MINI_OVERLAY_STATES.ERROR, {
       message: '未看到 ChatGPT 转写请求，请确认网页端听写已经开始或重试。'
     });
@@ -104,6 +113,171 @@ const dictationSession = createDictationSession({
     return startShortcutBridge.trigger();
   }
 });
+
+function isPromiseLike(value) {
+  return value && typeof value.then === 'function';
+}
+
+function getErrorMessage(error) {
+  if (error && error.message) {
+    return error.message;
+  }
+
+  return String(error || 'unknown');
+}
+
+function isDictationSessionIdle() {
+  return dictationSession.getSnapshot().phase === DICTATION_PHASES.IDLE;
+}
+
+function clearNetworkTranscriptFallback() {
+  if (networkTranscriptFallbackTimer) {
+    clearTimeout(networkTranscriptFallbackTimer);
+    networkTranscriptFallbackTimer = null;
+  }
+
+  pendingNetworkTranscript = null;
+}
+
+function scheduleNetworkTranscriptFallback(payload) {
+  clearNetworkTranscriptFallback();
+
+  pendingNetworkTranscript = {
+    requestId: String((payload && payload.requestId) || '').trim(),
+    text: String((payload && payload.text) || '').trim()
+  };
+
+  logger.info('transcribe.network_fallback_scheduled', {
+    delayMs: NETWORK_TRANSCRIPT_FALLBACK_MS,
+    requestId: pendingNetworkTranscript.requestId,
+    textLength: pendingNetworkTranscript.text.length
+  });
+
+  networkTranscriptFallbackTimer = setTimeout(function finalizeNetworkTranscriptFallback() {
+    const candidate = pendingNetworkTranscript;
+    clearNetworkTranscriptFallback();
+
+    if (!candidate || !candidate.text) {
+      return;
+    }
+
+    const sessionSnapshot = dictationSession.getSnapshot();
+
+    if (
+      !transcriptResultEnabled ||
+      sessionSnapshot.phase !== DICTATION_PHASES.WAITING_RESPONSE ||
+      candidate.requestId !== sessionSnapshot.observedTranscribeRequestId
+    ) {
+      logger.debug('transcribe.network_fallback_ignored_inactive', {
+        observedRequestId: sessionSnapshot.observedTranscribeRequestId,
+        phase: sessionSnapshot.phase,
+        requestId: candidate.requestId,
+        textLength: candidate.text.length
+      });
+      return;
+    }
+
+    logger.info('transcribe.network_fallback_finalizing', {
+      requestId: candidate.requestId,
+      textLength: candidate.text.length
+    });
+
+    if (transcriptPipeline) {
+      transcriptPipeline.finalizeText(candidate.text, {
+        force: true
+      });
+    }
+  }, NETWORK_TRANSCRIPT_FALLBACK_MS);
+}
+
+function clearChatGptInputBeforeStart(webContents) {
+  const clearResult = clearChatGptInput(webContents);
+
+  if (!isPromiseLike(clearResult)) {
+    return clearResult;
+  }
+
+  // Do not let a stuck renderer-side executeJavaScript block the shortcut
+  // forever. If clearing the input takes too long, start dictation anyway and
+  // leave an explicit log entry for diagnosis.
+  return new Promise((resolve) => {
+    let settled = false;
+    const timeout = setTimeout(function onClearInputTimeout() {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      logger.warn('dictation.start.clear_input_timeout_continue', {
+        timeoutMs: START_READY_TIMEOUT_MS
+      });
+      resolve(false);
+    }, START_READY_TIMEOUT_MS);
+
+    clearResult.then((result) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      clearTimeout(timeout);
+      resolve(result);
+    }).catch((error) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      clearTimeout(timeout);
+      logger.warn('dictation.start.clear_input_failed_continue', {
+        error: getErrorMessage(error)
+      });
+      resolve(false);
+    });
+  });
+}
+
+function deferStopUntilStartShortcutSent(bindingConfig) {
+  stopAfterPendingStart = true;
+  logger.info('dictation.stop.deferred_until_start_sent', {
+    binding: bindingConfig.binding,
+    mode: currentMode,
+    session: dictationSession.getSnapshot(),
+    targetChord: bindingConfig.targetChord
+  });
+  return {
+    action: bindingConfig.action,
+    skipReason: 'start_pending',
+    skipSend: true
+  };
+}
+
+function triggerDeferredStopAfterStart() {
+  if (!stopAfterPendingStart) {
+    return;
+  }
+
+  stopAfterPendingStart = false;
+
+  if (!stopShortcutBridge || !stopShortcutBridge.isRegistered()) {
+    logger.warn('dictation.stop.deferred_unavailable', {
+      session: dictationSession.getSnapshot()
+    });
+    return;
+  }
+
+  logger.info('dictation.stop.deferred_triggered', {
+    session: dictationSession.getSnapshot()
+  });
+  setTimeout(function triggerDeferredStop() {
+    stopShortcutBridge.trigger();
+  }, DEFERRED_STOP_AFTER_START_MS);
+}
+
+function resetShortcutCoordination() {
+  startShortcutPending = false;
+  stopAfterPendingStart = false;
+}
 
 function getAppIcon() {
   if (!appIcon) {
@@ -612,6 +786,7 @@ function createDictationBridge(bindingConfig) {
         }
 
         if (context.action === 'start') {
+          startShortcutPending = false;
           dictationSession.markStartShortcutSent();
         }
         if (context.action === 'stop') {
@@ -630,6 +805,9 @@ function createDictationBridge(bindingConfig) {
             logger: logger
           });
         }
+        if (context.action === 'start') {
+          triggerDeferredStopAfterStart();
+        }
         setTimeout(function restorePreviousForegroundWindow() {
           restoreForegroundWindow(context.foregroundWindow);
 
@@ -641,6 +819,27 @@ function createDictationBridge(bindingConfig) {
         }, 120);
       },
       beforeSend: function beforeSend() {
+        if (bindingConfig.action === 'start') {
+          if (startShortcutPending || !isDictationSessionIdle()) {
+            logger.warn('dictation.start.skipped_active_session', {
+              binding: bindingConfig.binding,
+              mode: currentMode,
+              session: dictationSession.getSnapshot(),
+              startShortcutPending: startShortcutPending,
+              targetChord: bindingConfig.targetChord
+            });
+            return {
+              action: bindingConfig.action,
+              skipReason: 'active_session',
+              skipSend: true
+            };
+          }
+        }
+
+        if (bindingConfig.action === 'stop' && startShortcutPending) {
+          return deferStopUntilStartShortcutSent(bindingConfig);
+        }
+
         if (bindingConfig.action === 'stop' && !dictationSession.canSendStop()) {
           logger.warn('dictation.stop.skipped_not_listening', {
             binding: bindingConfig.binding,
@@ -668,9 +867,10 @@ function createDictationBridge(bindingConfig) {
             mode: currentMode,
             targetChord: bindingConfig.targetChord
           });
+          startShortcutPending = true;
           playSoundAfterSend = true;
           overlayStateAfterSend = MINI_OVERLAY_STATES.LISTENING;
-          readyToSend = clearChatGptInput(mainWindow.webContents);
+          readyToSend = clearChatGptInputBeforeStart(mainWindow.webContents);
         } else if (bindingConfig.action === 'stop') {
           logger.info('dictation.stop.before_send', {
             binding: bindingConfig.binding,
@@ -686,6 +886,8 @@ function createDictationBridge(bindingConfig) {
             targetChord: bindingConfig.targetChord
           });
           transcriptResultEnabled = false;
+          resetShortcutCoordination();
+          clearNetworkTranscriptFallback();
           dictationSession.cancel();
           if (transcriptPipeline) {
             transcriptPipeline.discardPendingTranscript();
@@ -778,6 +980,8 @@ function registerShortcutBridges() {
       registeredAccelerators[bindingConfig.binding] = true;
       if (bindingConfig.action === 'start') {
         startShortcutBridge = bridge;
+      } else if (bindingConfig.action === 'stop') {
+        stopShortcutBridge = bridge;
       }
       bridges.push(bridge);
     }
@@ -804,6 +1008,7 @@ function registerTranscriptPipeline() {
     clipboard: clipboard,
     logger: logger,
     onError: function onTranscriptError(payload) {
+      clearNetworkTranscriptFallback();
       logger.error('transcript.pipeline.error', {
         message: payload.message,
         textLength: String(payload.text || '').length
@@ -814,6 +1019,7 @@ function registerTranscriptPipeline() {
       });
     },
     onFinalized: function onTranscriptFinalized(payload) {
+      clearNetworkTranscriptFallback();
       logger.info('transcript.finalized', {
         autoPaste: payload.autoPaste,
         pasted: payload.pasted,
@@ -852,10 +1058,23 @@ function registerTranscriptPipeline() {
       return;
     }
 
+    const domText = String((payload && payload.text) || '').trim();
+
     logger.debug('transcript.dom.received', {
       source: payload && payload.source,
-      textLength: String((payload && payload.text) || '').length
+      textLength: domText.length
     });
+    if (
+      pendingNetworkTranscript &&
+      transcriptPipeline &&
+      domText !== transcriptPipeline.getLastText()
+    ) {
+      logger.debug('transcribe.network_fallback_replaced_by_dom', {
+        requestId: pendingNetworkTranscript.requestId,
+        textLength: pendingNetworkTranscript.text.length
+      });
+      clearNetworkTranscriptFallback();
+    }
     transcriptPipeline.handleTranscript(payload);
   });
 }
@@ -895,12 +1114,14 @@ function installTranscribeMonitor() {
 
       logger.error('transcribe.failed', {
         errorText: payload.errorText,
+        remoteDebugDir: payload.remoteDebugDir,
         requestId: requestId,
         statusCode: payload.statusCode,
         statusText: payload.statusText,
         url: payload.url
       });
       dictationSession.reset();
+      clearNetworkTranscriptFallback();
       sendMiniOverlayDictationState(MINI_OVERLAY_STATES.ERROR, {
         message: 'ChatGPT 转写请求失败：' +
           (payload.errorText || payload.statusText || payload.statusCode || 'unknown')
@@ -909,6 +1130,7 @@ function installTranscribeMonitor() {
     onStarted: function onTranscribeStarted(payload) {
       logger.info('transcribe.started', {
         method: payload && payload.method,
+        remoteDebugDir: payload && payload.remoteDebugDir,
         requestId: payload && payload.requestId,
         url: payload && payload.url
       });
@@ -956,17 +1178,15 @@ function installTranscribeMonitor() {
       }
 
       logger.info('transcribe.succeeded', {
+        remoteDebugDir: payload.remoteDebugDir,
         requestId: requestId,
         statusCode: payload.statusCode,
         textLength: String(payload.text || '').length,
         url: payload.url
       });
-      if (transcriptPipeline) {
-        transcriptPipeline.finalizeText(payload.text, {
-          force: true
-        });
-      }
+      scheduleNetworkTranscriptFallback(payload);
     },
+    remoteDebugLogDir: path.join(config.userDataDir, 'remote-debug', 'transcribe'),
     webContents: mainWindow.webContents
   });
 
@@ -1011,6 +1231,8 @@ function boot() {
   app.on('before-quit', function beforeQuit() {
     logger.info('app.before_quit');
     app.isQuiting = true;
+    resetShortcutCoordination();
+    clearNetworkTranscriptFallback();
     dictationSession.reset();
     if (transcribeMonitor) {
       transcribeMonitor.stop();

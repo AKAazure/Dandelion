@@ -205,6 +205,11 @@ sequenceDiagram
 
   User->>Main: press start, stop, or active cancel binding
   Main->>Bridge: globalShortcut callback
+  alt start while another start is pending or session is active
+    Main->>Main: skip duplicate start
+  else stop while start shortcut is pending
+    Main->>Main: defer stop until start shortcut is sent
+  else shortcut can proceed
   Main->>Main: capture current foreground HWND
   alt hidden or mini mode
     Main->>Window: move offscreen, set opacity 0, showInactive
@@ -215,10 +220,16 @@ sequenceDiagram
   Main->>Page: focus ChatGPT WebContents
   alt start binding
     Main->>Page: clear ChatGPT input box
+    opt clear input stalls
+      Main->>Main: continue after 1000ms
+    end
     Bridge->>Page: sendInputEvent configured target chord
     Main->>Session: markStartShortcutSent()
     Main->>Main: play Windows system sound
     Main->>Overlay: send listening state
+    opt stop was deferred
+      Main->>Bridge: trigger stop binding after start restore window gap
+    end
     Page->>Main: trusted media permission request
     Main->>Session: markTrustedMediaRequest()
   else stop binding
@@ -245,16 +256,13 @@ sequenceDiagram
   alt start or stop binding
   Page-->>User: ChatGPT starts or toggles dictation
   Page->>Monitor: POST /backend-api/transcribe
-  Monitor->>Main: onStarted()
+  Monitor->>Main: onStarted(remoteDebugDir)
   Main->>Session: markTranscribeRequestStarted()
   Main->>Session: clear request timeout and wait for response
-  Monitor->>Main: onSucceeded({ text })
-  Main->>Main: finalizeText(text, force)
-  Main->>Clipboard: write transcript text
-  Main->>Main: save last transcript to userData
-  Main->>Overlay: send success state with transcript text
-  Main->>Target: send Ctrl+V on Windows
-  opt network monitor unavailable or response has no text
+  Monitor->>Main: onSucceeded({ text, remoteDebugDir })
+  Main->>Main: schedule network transcript fallback
+  opt DOM transcript arrives before fallback
+  Main->>Main: clear network fallback
   Preload->>Preload: observe input/user message DOM
   Preload->>Main: transcript payload
   Main->>Main: wait until transcript is stable
@@ -263,10 +271,32 @@ sequenceDiagram
   Main->>Overlay: send success state with transcript text
   Main->>Target: send Ctrl+V on Windows
   end
+  opt DOM transcript does not arrive
+  Main->>Main: finalize network fallback after 5000ms
+  Main->>Clipboard: write transcript text
+  Main->>Main: save last transcript to userData
+  Main->>Overlay: send success state with transcript text
+  Main->>Target: send Ctrl+V on Windows
+  end
   else cancel binding
     Page-->>User: ChatGPT cancels current dictation if active
   end
+  end
 ```
+
+## 快捷键 Coordination
+
+`main.js` 维护一层很窄的 shortcut coordination 状态：
+
+- `startShortcutPending`：start 已经通过 `beforeSend`，但 web shortcut 还没真正发给 ChatGPT。
+- `stopAfterPendingStart`：用户在 start pending 时按了 stop；这个 stop 不会丢弃，会在 start `afterSend` 后重新触发。
+
+这个 coordination 解决两个 race：
+
+- start 还在等待清空 ChatGPT 输入栏时，用户立刻按 stop；旧行为会因为 session 还没进入 listening 而把 stop 直接 skip。
+- session 已经 listening / processing 时再次按 start；旧行为可能再次发送 `Ctrl+Shift+D`，把 ChatGPT 的听写开关翻到 app 预期之外。
+
+清空输入栏仍然优先发生在 start shortcut 前，但最多等待 `1000ms`。超时后 app 会继续发送 start，并写 `dictation.start.clear_input_timeout_continue`，避免 renderer-side `executeJavaScript` 卡住时整条快捷键链没有 `after_send`。
 
 ## 窗口模式
 
@@ -307,10 +337,11 @@ sequenceDiagram
 - 麦克风权限会显示原生确认框，用户可以选“始终允许”“仅本次允许”或“拒绝”。“始终允许”会保存到 `permissions.json`，后续同一 ChatGPT origin 的 `media` 请求会直接放行。
 - mini overlay 只有在 `mini` 模式可见且状态为 `listening` 时，才通过本地 `file://` UI 读取麦克风电平来显示声波；待机、处理中、成功、失败和其他窗口模式都会停止本地 mic tracks。这个本地 UI 位于 app root 内，由 permission handler 自动放行；如果系统层面拒绝麦克风，overlay 会退回到非真实音量的 fallback 动画。overlay 支持拖动到任意屏幕，位置保存到 `userData/mini-overlay-placement.json`，屏幕布局变化后会 clamp 到最近可用 display。
 - ChatGPT transcribe monitor 使用 `webContents.debugger` 监听网页实际 transcribe request，并读取 response body 作为优先完成信号；如果 debugger 被 DevTools 或其他工具占用，会记录 warning 并退回 DOM 观察器。
-- transcript DOM 观察器是 network monitor 不可用或 response body 无文本时的 fallback。它依赖 ChatGPT 当前网页结构，已使用宽松 selector，但网页改版后仍可能需要更新。
+- transcript DOM 观察器现在优先于 network 候选结果完成。network monitor 成功后会先 schedule 一个 `5000ms` fallback；如果 DOM transcript 在这期间到达并进入 pipeline，就清掉 network fallback。这样可以避免 network response 先返回截断文本时过早 `transcript.finalized`。
+- transcribe monitor 会为每条 remote request 写 raw artifact，并在 `transcribe.started`、`transcribe.succeeded`、`transcribe.failed` 普通日志里带上 `remoteDebugDir`。packaged app 的目录是 `%APPDATA%\Dandelion\remote-debug\transcribe\<timestamp>\<requestId>\`；这里保存 CDP request/response events、request post data、response body 和解析出的 transcript。
 - Windows 粘贴使用 PowerShell `System.Windows.Forms.SendKeys` 发出 `Ctrl+V`。如果目标应用或游戏使用管理员权限、独占输入或屏蔽模拟按键，可能需要让本 app 以相同权限运行。
 - 为了让 ChatGPT 页面收到网页快捷键，app 会在触发时 focus 内嵌 `WebContents`，然后通过 Win32 `SetForegroundWindow` 尝试恢复之前的前台窗口。`hidden` 和 `mini` 模式下窗口会先移到屏幕外、设为完全透明并使用 `showInactive` 激活，等待 `220ms` 后再发送快捷键，发送后立刻恢复隐藏，所以正常听写不会把 ChatGPT 窗口闪到屏幕上。某些管理员权限窗口、独占全屏游戏或输入保护软件可能拒绝恢复焦点。
 - 开始听写会先通过页面脚本清空 ChatGPT 当前输入栏。Windows `SystemSounds.Asterisk` 和 mini overlay listening 状态会在网页快捷键实际发送后触发。之后 session 会等待 ChatGPT trusted `media` permission request；如果短时间内没有看到这个网页端开始信号，会自动重试一次 start。
-- 结束听写只有在 session 处于 `listening` 时才会向网页发送 stop；否则会 `skipSend`，避免同一个 `Ctrl+Shift+D` toggle 反向启动网页听写。stop 后会把 overlay 切到 `processing`，并按本轮听写时长启动线性 request timeout：默认 `15s + listeningDuration`。这样 `30s` 听写会等待 `45s`，`61s` 听写会等待约 `76.0s`，`86s` 听写会等待约 `100.6s`，`113s` 听写会等待约 `128.1s`。这个 timeout 只判断有没有看到 transcribe request。一旦看到 request，就清理 timeout，并继续等待 network response、DOM fallback、用户取消或明确失败。network response 只有在当前 session 已经进入 `waiting_response`，且 `requestId` 与本轮观察到的 transcribe request 一致时才会 finalize；DOM fallback 也只会在 stop 之后的 `processing / waiting_response` 阶段生效。完成后切到 `success`，显示 `√` 和最终文本；没有 request、transcribe 失败或 pipeline 失败时切到 `error`，显示可选择、可复制的错误文本。
+- 结束听写只有在 session 处于 `listening` 时才会向网页发送 stop；否则会 `skipSend`，避免同一个 `Ctrl+Shift+D` toggle 反向启动网页听写。stop 后会把 overlay 切到 `processing`，并按本轮听写时长启动线性 request timeout：默认 `15s + listeningDuration`。这样 `30s` 听写会等待 `45s`，`61s` 听写会等待约 `76.0s`，`86s` 听写会等待约 `100.6s`，`113s` 听写会等待约 `128.1s`。这个 timeout 只判断有没有看到 transcribe request。一旦看到 request，就清理 timeout，并继续等待 network response、DOM fallback、用户取消或明确失败。network response 只有在当前 session 已经进入 `waiting_response`，且 `requestId` 与本轮观察到的 transcribe request 一致时才会成为 fallback 候选；DOM fallback 也只会在 stop 之后的 `processing / waiting_response` 阶段生效。完成后切到 `success`，显示 `√` 和最终文本；没有 request、transcribe 失败或 pipeline 失败时切到 `error`，显示可选择、可复制的错误文本。
 - 取消听写的 `Escape` binding 只在 `listening` / `processing` 状态临时注册。取消后会向 ChatGPT 发送 `Escape`，清空输入栏，回到 `idle`，并忽略本轮后续 DOM/network transcript。
 - transcript 默认稳定 `2500ms` 后才会复制和粘贴，最后完成文本会保存到 `last-transcript.json`，下次启动会自动恢复到剪贴板。

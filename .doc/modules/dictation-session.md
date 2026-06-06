@@ -46,7 +46,7 @@ timeout = baseTimeout + listeningDuration
 
 标记已经看到 ChatGPT 的 transcribe request。调用后会清理 request timeout，并进入 `waiting_response`。从这里开始不再用固定 15 秒限制 response。
 
-在日志语义上，`transcribe.succeeded` 表示 network monitor 已经拿到 ChatGPT 的 transcribe response 并解析出文本；`transcript.finalized` 表示这段文本已经经过本地 transcript pipeline，写入剪贴板、保存到 `last-transcript.json`，并在开启自动粘贴时发出粘贴。当前 session snapshot 里还会带上 `observedTranscribeRequestId`，main process 用它保证只有“stop 后观察到的那条 request”的 response 才能 finalize，避免 timeout 后的迟到旧结果串进新 session。
+在日志语义上，`transcribe.succeeded` 表示 network monitor 已经拿到 ChatGPT 的 transcribe response 并解析出文本；`transcript.finalized` 表示某个 DOM 或 network fallback 候选已经经过本地 transcript pipeline，写入剪贴板、保存到 `last-transcript.json`，并在开启自动粘贴时发出粘贴。当前 session snapshot 里还会带上 `observedTranscribeRequestId`，main process 用它保证只有“stop 后观察到的那条 request”的 response 才能成为 fallback 候选，避免 timeout 后的迟到旧结果串进新 session。
 
 ### `reset()` / `cancel()`
 

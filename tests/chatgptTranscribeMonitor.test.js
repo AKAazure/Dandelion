@@ -1,6 +1,9 @@
 'use strict';
 
 const assert = require('assert');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 
 const {
   createChatGptTranscribeMonitor,
@@ -9,7 +12,19 @@ const {
   recursiveFindTranscriptText
 } = require('../src/main/chatgptTranscribeMonitor');
 
-function createFakeDebugger(responseBody) {
+function readJson(filePath) {
+  return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+}
+
+function findSingleRequestDebugDir(rootDir) {
+  const dateDirs = fs.readdirSync(rootDir);
+  assert.strictEqual(dateDirs.length, 1);
+  const requestDirs = fs.readdirSync(path.join(rootDir, dateDirs[0]));
+  assert.strictEqual(requestDirs.length, 1);
+  return path.join(rootDir, dateDirs[0], requestDirs[0]);
+}
+
+function createFakeDebugger(responseBody, requestPostData) {
   const listeners = {};
 
   return {
@@ -42,6 +57,12 @@ function createFakeDebugger(responseBody) {
         return Promise.resolve(responseBody);
       }
 
+      if (command === 'Network.getRequestPostData') {
+        return Promise.resolve({
+          postData: requestPostData || ''
+        });
+      }
+
       return Promise.resolve({});
     }
   };
@@ -71,20 +92,28 @@ async function run() {
 
   const started = [];
   const succeeded = [];
+  const remoteDebugDir = fs.mkdtempSync(path.join(os.tmpdir(), 'general-stt-remote-debug-'));
   const fakeDebugger = createFakeDebugger({
     base64Encoded: false,
-    body: JSON.stringify({ text: 'hello from network' })
-  });
+    body: JSON.stringify({
+      details: {
+        transcript: 'hello from network'
+      },
+      text: 'short text'
+    })
+  }, 'remote post data from getRequestPostData');
   const monitor = createChatGptTranscribeMonitor({
     onStarted: function onStarted(payload) {
       started.push(payload.url);
     },
     onSucceeded: function onSucceeded(payload) {
       succeeded.push({
+        remoteDebugDir: payload.remoteDebugDir,
         statusCode: payload.statusCode,
         text: payload.text
       });
     },
+    remoteDebugLogDir: remoteDebugDir,
     webContents: {
       debugger: fakeDebugger
     }
@@ -93,7 +122,12 @@ async function run() {
   assert.strictEqual(monitor.start(), true);
   fakeDebugger.emit('Network.requestWillBeSent', {
     request: {
+      headers: {
+        authorization: 'Bearer remote-token-for-debug',
+        'content-type': 'multipart/form-data; boundary=test'
+      },
       method: 'POST',
+      postData: 'raw multipart remote request body',
       url: 'https://chatgpt.com/backend-api/transcribe'
     },
     requestId: '1'
@@ -101,6 +135,10 @@ async function run() {
   fakeDebugger.emit('Network.responseReceived', {
     requestId: '1',
     response: {
+      headers: {
+        'content-type': 'application/json',
+        'x-debug-remote': 'yes'
+      },
       mimeType: 'application/json',
       status: 200,
       statusText: 'OK'
@@ -110,11 +148,43 @@ async function run() {
     requestId: '1'
   });
   await sleep(0);
+  await sleep(0);
 
   assert.deepStrictEqual(started, ['https://chatgpt.com/backend-api/transcribe']);
+  assert.strictEqual(succeeded.length, 1);
+  assert.strictEqual(succeeded[0].statusCode, 200);
+  assert.strictEqual(succeeded[0].text, 'short text');
+  assert.ok(succeeded[0].remoteDebugDir);
+
+  const requestDebugDir = findSingleRequestDebugDir(remoteDebugDir);
+  assert.strictEqual(succeeded[0].remoteDebugDir, requestDebugDir);
+  assert.strictEqual(
+    readJson(path.join(requestDebugDir, 'request-will-be-sent.json')).params.request.postData,
+    'raw multipart remote request body'
+  );
+  assert.strictEqual(
+    readJson(path.join(requestDebugDir, 'request-will-be-sent.json')).params.request.headers.authorization,
+    'Bearer remote-token-for-debug'
+  );
+  assert.strictEqual(
+    readJson(path.join(requestDebugDir, 'request-post-data.json')).response.postData,
+    'remote post data from getRequestPostData'
+  );
+  assert.strictEqual(
+    readJson(path.join(requestDebugDir, 'response-received.json')).params.response.headers['x-debug-remote'],
+    'yes'
+  );
+  assert.deepStrictEqual(readJson(path.join(requestDebugDir, 'loading-finished.json')).params, {
+    requestId: '1'
+  });
+  assert.deepStrictEqual(readJson(path.join(requestDebugDir, 'response-body.json')).transcript, {
+    text: 'short text',
+    textLength: 10
+  });
   assert.deepStrictEqual(succeeded, [{
+    remoteDebugDir: requestDebugDir,
     statusCode: 200,
-    text: 'hello from network'
+    text: 'short text'
   }]);
   monitor.stop();
 

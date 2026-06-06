@@ -4,10 +4,10 @@
 
 Transcript pipeline 负责把 ChatGPT 语音转写文本送回系统当前输入框。它支持两种来源：
 
-- network monitor：读取 ChatGPT transcribe response body，拿到最终文本后立即完成。
-- preload：在 ChatGPT 页面中观察 DOM，提取输入框或最新用户消息文本，作为 network 不可用时的 fallback。
+- network monitor：读取 ChatGPT transcribe response body，把文本交给 main process 作为候选兜底。
+- preload：在 ChatGPT 页面中观察 DOM，提取输入框或最新用户消息文本，优先作为最终 transcript 来源。
 
-main process pipeline 统一负责去重、写剪贴板、保存最后完成文本、触发 Windows `Ctrl+V`。DOM 来源会先等待文本稳定；network 来源已经是最终 response，所以可以立即完成。
+main process pipeline 统一负责去重、写剪贴板、保存最后完成文本、触发 Windows `Ctrl+V`。DOM 来源会先等待文本稳定；network 来源不再立即完成，而是在 DOM 没有接管时作为延迟兜底，避免 ChatGPT network response 先返回截断文本时过早 finalize。
 
 相关文件：
 
@@ -93,7 +93,10 @@ sequenceDiagram
   alt network response path
     Page->>Monitor: transcribe response body
     Monitor->>Main: onSucceeded({ text })
-    Main->>Pipeline: finalizeText(text, { force: true })
+    Main->>Main: schedule network fallback
+    opt DOM does not provide a candidate
+      Main->>Pipeline: finalizeText(text, { force: true })
+    end
   else DOM fallback path
     Page->>Preload: input or mutation
     Preload->>Preload: debounce and collect text
@@ -118,7 +121,7 @@ sequenceDiagram
 - payload 文本标准化。
 - 候选 transcript 稳定前不会复制或粘贴。
 - 稳定后的新 transcript 会写入 clipboard、保存本地并调用 paste。
-- `finalizeText(text, { force: true })` 可以把相同文本重新写入 clipboard，用于 network response 消除 processing 误报。
+- `finalizeText(text, { force: true })` 可以把相同文本重新写入 clipboard，用于 network fallback 消除 processing 误报。
 - `discardPendingTranscript()` 会丢弃本轮候选文本，不写 clipboard、不 paste、不修改上一次完成文本。
 - 启动时会把上次完成 transcript 恢复到剪贴板。
 - Windows PowerShell 粘贴命令构造。

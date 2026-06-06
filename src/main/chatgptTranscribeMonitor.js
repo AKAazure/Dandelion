@@ -1,5 +1,10 @@
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
+
+const REMOTE_DEBUG_BODY_FILE = 'response-body.json';
+
 function noop() {}
 
 function defaultLogger() {
@@ -9,6 +14,74 @@ function defaultLogger() {
     info: noop,
     warn: noop
   };
+}
+
+/**
+ * 标准化 remote debug 保存目录。
+ *
+ * @param {string} value 原始目录配置。
+ * @returns {string} 去空白后的目录；未配置时为空字符串。
+ */
+function readRemoteDebugLogDir(value) {
+  const normalized = String(value || '').trim();
+  return normalized || '';
+}
+
+/**
+ * 把 requestId 等值清理成安全的路径片段。
+ *
+ * @param {string} value 原始路径片段。
+ * @returns {string} 可用于文件夹名的片段。
+ */
+function sanitizePathSegment(value) {
+  return String(value || 'request')
+    .replace(/[^a-zA-Z0-9_.-]/g, '_')
+    .slice(0, 120) || 'request';
+}
+
+/**
+ * 写入 JSON artifact，必要时自动创建父目录。
+ *
+ * @param {string} filePath artifact 路径。
+ * @param {*} value 可 JSON 序列化的内容。
+ */
+function safeJsonWrite(filePath, value) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify(value, null, 2), 'utf8');
+}
+
+/**
+ * 构造某条 remote request 的 artifact 目录。
+ *
+ * @param {string} rootDir remote debug 根目录。
+ * @param {string} requestId CDP requestId。
+ * @param {number} startedAt request 开始时间戳。
+ * @returns {string} 该 request 的 artifact 目录。
+ */
+function buildRemoteDebugRequestDir(rootDir, requestId, startedAt) {
+  return path.join(
+    rootDir,
+    new Date(startedAt).toISOString().replace(/[:.]/g, '-'),
+    sanitizePathSegment(requestId)
+  );
+}
+
+/**
+ * 写入某个 request 的 remote debug artifact。
+ *
+ * @param {object} request pending request 信息。
+ * @param {string} fileName artifact 文件名。
+ * @param {*} payload artifact 内容。
+ * @returns {string} 写入路径；未启用时为空字符串。
+ */
+function writeRemoteDebugArtifact(request, fileName, payload) {
+  if (!request || !request.remoteDebugDir) {
+    return '';
+  }
+
+  const artifactPath = path.join(request.remoteDebugDir, fileName);
+  safeJsonWrite(artifactPath, payload);
+  return artifactPath;
 }
 
 /**
@@ -138,6 +211,7 @@ function extractTranscriptTextFromResponseBody(body, base64Encoded) {
  * @param {Function} [options.onSucceeded] transcribe response 2xx 完成时调用。
  * @param {Function} [options.onFailed] transcribe request 失败时调用。
  * @param {object} [options.logger] 可选 logger。
+ * @param {string} [options.remoteDebugLogDir] 原样保存 remote CDP 细节的目录。
  * @returns {object} monitor controller。
  */
 function createChatGptTranscribeMonitor(options) {
@@ -152,6 +226,7 @@ function createChatGptTranscribeMonitor(options) {
   const webContents = options.webContents;
   const debuggerApi = webContents.debugger;
   const logger = options.logger || defaultLogger();
+  const remoteDebugLogDir = readRemoteDebugLogDir(options.remoteDebugLogDir);
   const pendingRequests = {};
   let started = false;
 
@@ -173,6 +248,54 @@ function createChatGptTranscribeMonitor(options) {
     return request;
   }
 
+  function writeRemoteDebug(request, fileName, payload) {
+    if (!remoteDebugLogDir || !request) {
+      return '';
+    }
+
+    try {
+      return writeRemoteDebugArtifact(request, fileName, payload);
+    } catch (error) {
+      log('warn', 'transcribe.remote_debug_write_failed', {
+        error: error.message,
+        fileName: fileName,
+        requestId: request.requestId
+      });
+      return '';
+    }
+  }
+
+  // CDP requestWillBeSent may omit large request bodies. Ask CDP for the
+  // request post data separately so remote-debug artifacts preserve more of
+  // the actual payload when Chromium exposes it.
+  function captureRequestPostData(request) {
+    if (!remoteDebugLogDir || !request) {
+      return;
+    }
+
+    debuggerApi.sendCommand('Network.getRequestPostData', {
+      requestId: request.requestId
+    }).then((response) => {
+      writeRemoteDebug(request, 'request-post-data.json', {
+        cdpCommand: 'Network.getRequestPostData',
+        recordedAt: new Date().toISOString(),
+        request: request,
+        response: response
+      });
+    }).catch((error) => {
+      writeRemoteDebug(request, 'request-post-data-unavailable.json', {
+        cdpCommand: 'Network.getRequestPostData',
+        error: {
+          message: error.message,
+          name: error.name,
+          stack: error.stack
+        },
+        recordedAt: new Date().toISOString(),
+        request: request
+      });
+    });
+  }
+
   function handleRequestWillBeSent(params) {
     const request = params && params.request;
 
@@ -180,14 +303,24 @@ function createChatGptTranscribeMonitor(options) {
       return;
     }
 
+    const startedAt = Date.now();
     pendingRequests[params.requestId] = {
       method: request.method,
       requestId: params.requestId,
-      startedAt: Date.now(),
+      remoteDebugDir: remoteDebugLogDir ?
+        buildRemoteDebugRequestDir(remoteDebugLogDir, params.requestId, startedAt) :
+        '',
+      startedAt: startedAt,
       statusCode: 0,
       statusText: '',
       url: request.url
     };
+    writeRemoteDebug(pendingRequests[params.requestId], 'request-will-be-sent.json', {
+      cdpMethod: 'Network.requestWillBeSent',
+      params: params,
+      recordedAt: new Date().toISOString()
+    });
+    captureRequestPostData(pendingRequests[params.requestId]);
     callIfFunction(options.onStarted, pendingRequests[params.requestId]);
   }
 
@@ -201,6 +334,11 @@ function createChatGptTranscribeMonitor(options) {
     request.statusCode = params.response.status || 0;
     request.statusText = params.response.statusText || '';
     request.mimeType = params.response.mimeType || '';
+    writeRemoteDebug(request, 'response-received.json', {
+      cdpMethod: 'Network.responseReceived',
+      params: params,
+      recordedAt: new Date().toISOString()
+    });
   }
 
   function handleLoadingFailed(params) {
@@ -210,6 +348,11 @@ function createChatGptTranscribeMonitor(options) {
       return;
     }
 
+    writeRemoteDebug(request, 'loading-failed.json', {
+      cdpMethod: 'Network.loadingFailed',
+      params: params,
+      recordedAt: new Date().toISOString()
+    });
     callIfFunction(options.onFailed, Object.assign({}, request, {
       errorText: params.errorText || 'Transcribe request failed.'
     }));
@@ -222,6 +365,12 @@ function createChatGptTranscribeMonitor(options) {
       return;
     }
 
+    writeRemoteDebug(request, 'loading-finished.json', {
+      cdpMethod: 'Network.loadingFinished',
+      params: params,
+      recordedAt: new Date().toISOString()
+    });
+
     if (request.statusCode < 200 || request.statusCode >= 300) {
       callIfFunction(options.onFailed, Object.assign({}, request, {
         errorText: request.statusText || 'Transcribe request returned non-2xx status.'
@@ -232,20 +381,43 @@ function createChatGptTranscribeMonitor(options) {
     debuggerApi.sendCommand('Network.getResponseBody', {
       requestId: request.requestId
     }).then((response) => {
+      const text = extractTranscriptTextFromResponseBody(
+        response && response.body,
+        response && response.base64Encoded
+      );
+      writeRemoteDebug(request, REMOTE_DEBUG_BODY_FILE, {
+        cdpCommand: 'Network.getResponseBody',
+        recordedAt: new Date().toISOString(),
+        request: request,
+        response: response,
+        transcript: {
+          text: text,
+          textLength: text.length
+        }
+      });
       callIfFunction(options.onSucceeded, Object.assign({}, request, {
         base64Encoded: Boolean(response && response.base64Encoded),
-        text: extractTranscriptTextFromResponseBody(
-          response && response.body,
-          response && response.base64Encoded
-        )
+        remoteDebugDir: request.remoteDebugDir,
+        text: text
       }));
     }).catch((error) => {
       log('warn', 'transcribe.response_body_read_failed', {
         error: error.message,
         url: request.url
       });
+      writeRemoteDebug(request, 'response-body-read-failed.json', {
+        cdpCommand: 'Network.getResponseBody',
+        error: {
+          message: error.message,
+          name: error.name,
+          stack: error.stack
+        },
+        recordedAt: new Date().toISOString(),
+        request: request
+      });
       callIfFunction(options.onSucceeded, Object.assign({}, request, {
         base64Encoded: false,
+        remoteDebugDir: request.remoteDebugDir,
         text: ''
       }));
     });
@@ -283,7 +455,11 @@ function createChatGptTranscribeMonitor(options) {
           debuggerApi.attach('1.3');
         }
         debuggerApi.on('message', handleDebuggerMessage);
-        debuggerApi.sendCommand('Network.enable').catch((error) => {
+        debuggerApi.sendCommand('Network.enable', {
+          maxPostDataSize: 50 * 1024 * 1024,
+          maxResourceBufferSize: 50 * 1024 * 1024,
+          maxTotalBufferSize: 100 * 1024 * 1024
+        }).catch((error) => {
           log('warn', 'transcribe.monitor_network_enable_failed', {
             error: error.message
           });
@@ -315,8 +491,11 @@ function createChatGptTranscribeMonitor(options) {
 }
 
 module.exports = {
+  REMOTE_DEBUG_BODY_FILE: REMOTE_DEBUG_BODY_FILE,
+  buildRemoteDebugRequestDir: buildRemoteDebugRequestDir,
   createChatGptTranscribeMonitor: createChatGptTranscribeMonitor,
   extractTranscriptTextFromResponseBody: extractTranscriptTextFromResponseBody,
   isLikelyTranscribeRequest: isLikelyTranscribeRequest,
-  recursiveFindTranscriptText: recursiveFindTranscriptText
+  recursiveFindTranscriptText: recursiveFindTranscriptText,
+  sanitizePathSegment: sanitizePathSegment
 };
