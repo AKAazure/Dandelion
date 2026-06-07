@@ -70,7 +70,9 @@ function getPrimaryWorkArea(screenApi) {
  * 构造主窗口初始参数。
  *
  * Electron 的 BrowserWindow 不适合真正创建 `0x0` 窗口，所以初始窗口保持
- * 一个可用尺寸，再通过 `applyWindowMode` 控制隐藏、极小化或展示。
+ * 一个可用尺寸，再通过 `applyWindowMode` 控制隐藏、极小化或展示。ChatGPT
+ * dictation 和 app recorder 都跑在这个 WebContents 中，所以关闭 background
+ * throttling，避免 mini / hidden 模式下长录音被 Chromium 后台节流截短。
  *
  * @param {string} preloadPath ChatGPT preload 脚本路径。
  * @param {string} [iconPath] app icon 路径。
@@ -83,6 +85,7 @@ function buildMainWindowOptions(preloadPath, iconPath) {
     show: false,
     title: 'Dandelion',
     webPreferences: {
+      backgroundThrottling: false,
       contextIsolation: true,
       nodeIntegration: false,
       partition: 'persist:chatgpt',

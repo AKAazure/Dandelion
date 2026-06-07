@@ -94,30 +94,20 @@ test('normalizes ChatGPT target chord into webContents modifier format', functio
   });
 });
 
-test('builds keyDown and keyUp events for the target chord', function () {
+test('builds a rawKeyDown event for the target chord', function () {
   assert.deepStrictEqual(buildWebKeyEvents('Ctrl+Shift+D'), [
     {
-      type: 'keyDown',
-      keyCode: 'D',
-      modifiers: ['control', 'shift']
-    },
-    {
-      type: 'keyUp',
+      type: 'rawKeyDown',
       keyCode: 'D',
       modifiers: ['control', 'shift']
     }
   ]);
 });
 
-test('builds Escape key events for cancel dictation', function () {
+test('builds an Escape rawKeyDown event for cancel dictation', function () {
   assert.deepStrictEqual(buildWebKeyEvents('Escape'), [
     {
-      type: 'keyDown',
-      keyCode: 'Escape',
-      modifiers: []
-    },
-    {
-      type: 'keyUp',
+      type: 'rawKeyDown',
       keyCode: 'Escape',
       modifiers: []
     }
@@ -141,12 +131,7 @@ test('maps custom host binding to ChatGPT Ctrl+Shift+D web events', function () 
   assert.strictEqual(webContents.focusCount, 0);
   assert.deepStrictEqual(webContents.events, [
     {
-      type: 'keyDown',
-      keyCode: 'D',
-      modifiers: ['control', 'shift']
-    },
-    {
-      type: 'keyUp',
+      type: 'rawKeyDown',
       keyCode: 'D',
       modifiers: ['control', 'shift']
     }
@@ -250,12 +235,7 @@ test('registers correctly when start is called without controller this binding',
   assert.strictEqual(globalShortcut.press('Alt+Shift+R'), true);
   assert.deepStrictEqual(webContents.events, [
     {
-      type: 'keyDown',
-      keyCode: 'D',
-      modifiers: ['control', 'shift']
-    },
-    {
-      type: 'keyUp',
+      type: 'rawKeyDown',
       keyCode: 'D',
       modifiers: ['control', 'shift']
     }

@@ -68,6 +68,23 @@ function createFakeDebugger(responseBody, requestPostData) {
   };
 }
 
+function buildMultipart(boundary, fileBuffer) {
+  return Buffer.concat([
+    Buffer.from(
+      '--' + boundary + '\r\n' +
+      'Content-Disposition: form-data; name="file"; filename="whisper.webm"\r\n' +
+      'Content-Type: audio/webm;codecs=opus\r\n' +
+      '\r\n',
+      'utf8'
+    ),
+    fileBuffer,
+    Buffer.from(
+      '\r\n--' + boundary + '--\r\n',
+      'utf8'
+    )
+  ]);
+}
+
 function sleep(ms) {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
@@ -187,6 +204,119 @@ async function run() {
     text: 'short text'
   }]);
   monitor.stop();
+
+  const replacementRemoteDebugDir = fs.mkdtempSync(path.join(os.tmpdir(), 'general-stt-replacement-debug-'));
+  const replacementBoundary = '----WebKitFormBoundaryReplacement';
+  const originalUpload = Buffer.from('short-original-upload');
+  const replacementUpload = Buffer.from('longer-app-recording-upload');
+  const replacementDebugger = createFakeDebugger({
+    base64Encoded: false,
+    body: JSON.stringify({
+      text: 'replacement text'
+    })
+  }, 'replacement post data');
+  const replacementMonitor = createChatGptTranscribeMonitor({
+    onSucceeded: function onSucceeded() {},
+    remoteDebugLogDir: replacementRemoteDebugDir,
+    uploadReplacement: {
+      enabled: true,
+      getRecording: function getRecording() {
+        return Promise.resolve({
+          base64: replacementUpload.toString('base64'),
+          byteLength: replacementUpload.length,
+          chunkCount: 2,
+          durationMs: 1234,
+          id: 'app-recording-test',
+          mimeType: 'audio/webm;codecs=opus',
+          ok: true
+        });
+      }
+    },
+    webContents: {
+      debugger: replacementDebugger
+    }
+  });
+
+  assert.strictEqual(replacementMonitor.start(), true);
+  assert.strictEqual(
+    replacementDebugger.commands.some((command) => command[0] === 'sendCommand' && command[1] === 'Fetch.enable'),
+    true
+  );
+  replacementDebugger.emit('Fetch.requestPaused', {
+    networkId: '3',
+    request: {
+      headers: {
+        authorization: 'Bearer replacement-token',
+        'content-length': String(originalUpload.length),
+        'content-type': 'multipart/form-data; boundary=' + replacementBoundary
+      },
+      method: 'POST',
+      postData: buildMultipart(replacementBoundary, originalUpload).toString('base64'),
+      url: 'https://chatgpt.com/backend-api/transcribe'
+    },
+    requestId: 'fetch-3'
+  });
+  await sleep(0);
+  await sleep(0);
+
+  const continueCommand = replacementDebugger.commands.find((command) => {
+    return command[0] === 'sendCommand' && command[1] === 'Fetch.continueRequest';
+  });
+  assert.ok(continueCommand);
+  assert.strictEqual(continueCommand[2].requestId, 'fetch-3');
+  assert.strictEqual(
+    Buffer.from(continueCommand[2].postData, 'base64').indexOf(replacementUpload) !== -1,
+    true
+  );
+  assert.strictEqual(
+    Buffer.from(continueCommand[2].postData, 'base64').indexOf(originalUpload),
+    -1
+  );
+  assert.strictEqual(
+    continueCommand[2].headers.some((entry) => entry.name.toLowerCase() === 'content-length'),
+    false
+  );
+
+  replacementDebugger.emit('Network.requestWillBeSent', {
+    request: {
+      method: 'POST',
+      url: 'https://chatgpt.com/backend-api/transcribe'
+    },
+    requestId: '3'
+  });
+  replacementDebugger.emit('Network.responseReceived', {
+    requestId: '3',
+    response: {
+      mimeType: 'application/json',
+      status: 200,
+      statusText: 'OK'
+    }
+  });
+  replacementDebugger.emit('Network.loadingFinished', {
+    requestId: '3'
+  });
+  await sleep(0);
+  await sleep(0);
+
+  const replacementRequestDebugDir = findSingleRequestDebugDir(replacementRemoteDebugDir);
+  assert.strictEqual(fs.existsSync(path.join(replacementRequestDebugDir, 'app-recording.webm')), true);
+  assert.strictEqual(
+    fs.readFileSync(path.join(replacementRequestDebugDir, 'app-recording.webm')).equals(replacementUpload),
+    true
+  );
+  assert.strictEqual(
+    readJson(path.join(replacementRequestDebugDir, 'request-replacement-decision.json')).replaced,
+    true
+  );
+  assert.strictEqual(
+    readJson(path.join(replacementRequestDebugDir, 'request-replacement-new-summary.json')).summary.replacementFileBytes,
+    replacementUpload.length
+  );
+  assert.strictEqual(
+    readJson(path.join(replacementRequestDebugDir, 'request-will-be-sent.json')).params.requestId,
+    '3'
+  );
+  replacementMonitor.stop();
 
   const failed = [];
   const failingDebugger = createFakeDebugger({

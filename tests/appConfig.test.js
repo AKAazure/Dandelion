@@ -86,6 +86,10 @@ function run() {
   });
   assert.strictEqual(defaultConfig.startMode, 'mini');
   assert.strictEqual(defaultConfig.transcriptStableMs, 2500);
+  assert.deepStrictEqual(defaultConfig.transcribe, {
+    replaceUploadWithAppRecording: false,
+    uploadReplacementWaitMs: 5000
+  });
 
   const config = loadAppConfig({
     DANDELION_AUTO_PASTE: 'false',
@@ -101,7 +105,9 @@ function run() {
     DANDELION_LOG_ENABLED: 'false',
     DANDELION_LOG_LEVEL: 'warn',
     DANDELION_LOG_RETENTION_DAYS: '30',
+    DANDELION_REPLACE_UPLOAD_WITH_APP_RECORDING: 'true',
     DANDELION_TRANSCRIPT_STABLE_MS: '1200',
+    DANDELION_UPLOAD_REPLACEMENT_WAIT_MS: '7000',
     DANDELION_USER_DATA_DIR: '/tmp/general-stt-test'
   }, ['--config=' + missingConfigPath]);
 
@@ -138,6 +144,10 @@ function run() {
     shortcutsEnabled: true,
     smokeTest: false,
     startMode: 'corner',
+    transcribe: {
+      replaceUploadWithAppRecording: true,
+      uploadReplacementWaitMs: 7000
+    },
     transcriptStableMs: 1200,
     userDataDir: '/tmp/general-stt-test'
   });
@@ -187,6 +197,10 @@ function run() {
       level: 'error',
       retentionDays: 14
     },
+    transcribe: {
+      replaceUploadWithAppRecording: true,
+      uploadReplacementWaitMs: 6500
+    },
     targetChords: {
       start: 'Ctrl+Shift+D',
       stop: 'Enter',
@@ -212,6 +226,10 @@ function run() {
     retentionDays: 14
   });
   assert.strictEqual(fileConfig.startMode, 'smart');
+  assert.deepStrictEqual(fileConfig.transcribe, {
+    replaceUploadWithAppRecording: true,
+    uploadReplacementWaitMs: 6500
+  });
   assert.strictEqual(fileConfig.transcriptStableMs, 900);
   assert.strictEqual(fileConfig.userDataDir, '/tmp/general-stt-file-user-data');
 

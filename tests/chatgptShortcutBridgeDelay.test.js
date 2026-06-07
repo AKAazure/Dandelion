@@ -82,12 +82,7 @@ async function run() {
   assert.strictEqual(webContents.focusCount, 1);
   assert.deepStrictEqual(webContents.events, [
     {
-      type: 'keyDown',
-      keyCode: 'D',
-      modifiers: ['control', 'shift']
-    },
-    {
-      type: 'keyUp',
+      type: 'rawKeyDown',
       keyCode: 'D',
       modifiers: ['control', 'shift']
     }

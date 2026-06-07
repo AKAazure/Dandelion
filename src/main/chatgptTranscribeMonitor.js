@@ -3,6 +3,8 @@
 const fs = require('fs');
 const path = require('path');
 
+const { buildUploadReplacement } = require('./chatgptUploadReplacement');
+
 const REMOTE_DEBUG_BODY_FILE = 'response-body.json';
 
 function noop() {}
@@ -48,6 +50,11 @@ function sanitizePathSegment(value) {
 function safeJsonWrite(filePath, value) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, JSON.stringify(value, null, 2), 'utf8');
+}
+
+function safeBinaryWrite(filePath, value) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, value);
 }
 
 /**
@@ -227,7 +234,11 @@ function createChatGptTranscribeMonitor(options) {
   const debuggerApi = webContents.debugger;
   const logger = options.logger || defaultLogger();
   const remoteDebugLogDir = readRemoteDebugLogDir(options.remoteDebugLogDir);
+  const uploadReplacement = options.uploadReplacement || {};
+  const uploadReplacementEnabled = uploadReplacement.enabled === true &&
+    typeof uploadReplacement.getRecording === 'function';
   const pendingRequests = {};
+  const remoteDebugDirsByNetworkId = {};
   let started = false;
 
   function log(level, message, details) {
@@ -265,6 +276,62 @@ function createChatGptTranscribeMonitor(options) {
     }
   }
 
+  function writeRemoteDebugBinary(request, fileName, payload) {
+    if (!remoteDebugLogDir || !request) {
+      return '';
+    }
+
+    try {
+      const artifactPath = path.join(request.remoteDebugDir, fileName);
+      safeBinaryWrite(artifactPath, payload);
+      return artifactPath;
+    } catch (error) {
+      log('warn', 'transcribe.remote_debug_write_failed', {
+        error: error.message,
+        fileName: fileName,
+        requestId: request.requestId
+      });
+      return '';
+    }
+  }
+
+  function buildFetchDebugRequest(params) {
+    const request = params && params.request || {};
+    const startedAt = Date.now();
+    const requestId = String((params && (params.networkId || params.requestId)) || '');
+    const remoteDebugDir = remoteDebugLogDir ?
+      buildRemoteDebugRequestDir(remoteDebugLogDir, requestId, startedAt) :
+      '';
+
+    if (params && params.networkId && remoteDebugDir) {
+      remoteDebugDirsByNetworkId[params.networkId] = remoteDebugDir;
+    }
+
+    return {
+      fetchRequestId: params && params.requestId,
+      method: request.method || '',
+      requestId: requestId,
+      remoteDebugDir: remoteDebugDir,
+      startedAt: startedAt,
+      statusCode: 0,
+      statusText: '',
+      url: request.url || ''
+    };
+  }
+
+  function continueFetchRequest(fetchRequestId, parameters) {
+    const payload = Object.assign({
+      requestId: fetchRequestId
+    }, parameters || {});
+
+    return debuggerApi.sendCommand('Fetch.continueRequest', payload).catch((error) => {
+      log('warn', 'transcribe.upload_replacement_continue_failed', {
+        error: error.message,
+        fetchRequestId: fetchRequestId
+      });
+    });
+  }
+
   // CDP requestWillBeSent may omit large request bodies. Ask CDP for the
   // request post data separately so remote-debug artifacts preserve more of
   // the actual payload when Chromium exposes it.
@@ -296,6 +363,108 @@ function createChatGptTranscribeMonitor(options) {
     });
   }
 
+  function writeUploadReplacementDecision(request, payload) {
+    writeRemoteDebug(request, 'request-replacement-decision.json', Object.assign({
+      recordedAt: new Date().toISOString(),
+      request: request
+    }, payload || {}));
+  }
+
+  function handleFetchRequestPaused(params) {
+    const pausedRequest = params && params.request;
+
+    if (!params || !pausedRequest) {
+      return;
+    }
+
+    if (params.responseStatusCode || params.responseErrorReason) {
+      continueFetchRequest(params.requestId);
+      return;
+    }
+
+    if (!isLikelyTranscribeRequest(pausedRequest.url, pausedRequest.method)) {
+      continueFetchRequest(params.requestId);
+      return;
+    }
+
+    const debugRequest = buildFetchDebugRequest(params);
+    writeRemoteDebug(debugRequest, 'request-replacement-paused.json', {
+      cdpMethod: 'Fetch.requestPaused',
+      params: params,
+      recordedAt: new Date().toISOString()
+    });
+
+    if (!uploadReplacementEnabled) {
+      writeUploadReplacementDecision(debugRequest, {
+        enabled: false,
+        reason: 'upload_replacement_disabled',
+        replaced: false
+      });
+      continueFetchRequest(params.requestId);
+      return;
+    }
+
+    Promise.resolve(uploadReplacement.getRecording({
+      remoteDebugDir: debugRequest.remoteDebugDir,
+      request: pausedRequest,
+      requestId: debugRequest.requestId
+    })).then((recording) => {
+      const replacement = buildUploadReplacement(pausedRequest, recording);
+
+      if (!replacement.ok) {
+        writeUploadReplacementDecision(debugRequest, {
+          enabled: true,
+          reason: replacement.reason || 'replacement_unavailable',
+          recording: recording ? {
+            byteLength: Number(recording.byteLength) || 0,
+            chunkCount: Number(recording.chunkCount) || 0,
+            durationMs: Number(recording.durationMs) || 0,
+            error: String(recording.error || ''),
+            id: String(recording.id || ''),
+            ok: recording.ok === true
+          } : null,
+          replaced: false
+        });
+        continueFetchRequest(params.requestId);
+        return;
+      }
+
+      writeRemoteDebugBinary(
+        debugRequest,
+        'app-recording.webm',
+        Buffer.from(String(recording.base64 || ''), 'base64')
+      );
+      writeRemoteDebug(debugRequest, 'app-recording-summary.json', {
+        recordedAt: new Date().toISOString(),
+        recording: replacement.recording
+      });
+      writeRemoteDebug(debugRequest, 'request-replacement-new-summary.json', {
+        recordedAt: new Date().toISOString(),
+        recording: replacement.recording,
+        summary: replacement.summary
+      });
+      writeUploadReplacementDecision(debugRequest, {
+        enabled: true,
+        reason: 'app_recording_available',
+        recording: replacement.recording,
+        replaced: true,
+        summary: replacement.summary
+      });
+      continueFetchRequest(params.requestId, {
+        headers: replacement.headers,
+        postData: replacement.body.toString('base64')
+      });
+    }).catch((error) => {
+      writeUploadReplacementDecision(debugRequest, {
+        enabled: true,
+        error: error && error.message ? error.message : String(error),
+        reason: 'replacement_failed',
+        replaced: false
+      });
+      continueFetchRequest(params.requestId);
+    });
+  }
+
   function handleRequestWillBeSent(params) {
     const request = params && params.request;
 
@@ -304,12 +473,16 @@ function createChatGptTranscribeMonitor(options) {
     }
 
     const startedAt = Date.now();
+    const remoteDebugDir = remoteDebugDirsByNetworkId[params.requestId] || (
+      remoteDebugLogDir ?
+        buildRemoteDebugRequestDir(remoteDebugLogDir, params.requestId, startedAt) :
+        ''
+    );
+    delete remoteDebugDirsByNetworkId[params.requestId];
     pendingRequests[params.requestId] = {
       method: request.method,
       requestId: params.requestId,
-      remoteDebugDir: remoteDebugLogDir ?
-        buildRemoteDebugRequestDir(remoteDebugLogDir, params.requestId, startedAt) :
-        '',
+      remoteDebugDir: remoteDebugDir,
       startedAt: startedAt,
       statusCode: 0,
       statusText: '',
@@ -424,6 +597,11 @@ function createChatGptTranscribeMonitor(options) {
   }
 
   function handleDebuggerMessage(_event, method, params) {
+    if (method === 'Fetch.requestPaused') {
+      handleFetchRequestPaused(params);
+      return;
+    }
+
     if (method === 'Network.requestWillBeSent') {
       handleRequestWillBeSent(params);
       return;
@@ -464,6 +642,20 @@ function createChatGptTranscribeMonitor(options) {
             error: error.message
           });
         });
+        if (uploadReplacementEnabled) {
+          debuggerApi.sendCommand('Fetch.enable', {
+            patterns: [
+              {
+                requestStage: 'Request',
+                urlPattern: '*://chatgpt.com/*transcribe*'
+              }
+            ]
+          }).catch((error) => {
+            log('warn', 'transcribe.upload_replacement_fetch_enable_failed', {
+              error: error.message
+            });
+          });
+        }
         started = true;
         return true;
       } catch (error) {
@@ -479,8 +671,18 @@ function createChatGptTranscribeMonitor(options) {
       }
 
       debuggerApi.removeListener('message', handleDebuggerMessage);
+      if (uploadReplacementEnabled && debuggerApi.isAttached()) {
+        debuggerApi.sendCommand('Fetch.disable').catch((error) => {
+          log('warn', 'transcribe.upload_replacement_fetch_disable_failed', {
+            error: error.message
+          });
+        });
+      }
       Object.keys(pendingRequests).forEach((requestId) => {
         delete pendingRequests[requestId];
+      });
+      Object.keys(remoteDebugDirsByNetworkId).forEach((requestId) => {
+        delete remoteDebugDirsByNetworkId[requestId];
       });
       started = false;
     },

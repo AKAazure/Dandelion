@@ -59,6 +59,15 @@ const {
   restoreWindowAfterShortcut
 } = require('./shortcutWindowActivation');
 const { createChatGptTranscribeMonitor } = require('./chatgptTranscribeMonitor');
+const {
+  startChatGptAppRecorder,
+  stopChatGptAppRecorder
+} = require('./chatgptAppRecorder');
+const { captureChatGptDomSnapshot } = require('./chatgptDomSnapshot');
+const {
+  captureChatGptRecorderProbeSnapshot,
+  installChatGptRecorderProbe
+} = require('./chatgptRecorderProbe');
 const { createTranscriptPipeline } = require('./transcriptPipeline');
 const { playWindowsSystemSound } = require('./systemSound');
 const { pasteTextIntoForeground } = require('./windowsPaste');
@@ -67,7 +76,9 @@ const config = loadAppConfig();
 const appRoot = path.join(__dirname, '..', '..');
 const appIconPath = resolveAppIconPath(appRoot);
 const DEFERRED_STOP_AFTER_START_MS = 160;
+const APP_RECORDER_START_TIMEOUT_MS = 2000;
 const NETWORK_TRANSCRIPT_FALLBACK_MS = 5000;
+const RECORDER_PROBE_INSTALL_TIMEOUT_MS = 1000;
 const START_READY_TIMEOUT_MS = 1000;
 const logger = createAppLogger({
   console: console,
@@ -94,10 +105,13 @@ let startShortcutPending = false;
 let stopAfterPendingStart = false;
 let networkTranscriptFallbackTimer = null;
 let pendingNetworkTranscript = null;
+let pendingAppRecording = null;
+let latestAppRecording = null;
 const dictationSession = createDictationSession({
   logger: logger,
   onMissingTranscribeRequest: function onMissingTranscribeRequest() {
     clearNetworkTranscriptFallback();
+    clearAppRecordingState();
     sendMiniOverlayDictationState(MINI_OVERLAY_STATES.ERROR, {
       message: '未看到 ChatGPT 转写请求，请确认网页端听写已经开始或重试。'
     });
@@ -130,6 +144,34 @@ function isDictationSessionIdle() {
   return dictationSession.getSnapshot().phase === DICTATION_PHASES.IDLE;
 }
 
+function captureTranscribeDomSnapshot(payload, label) {
+  if (!payload || !payload.remoteDebugDir || !mainWindow || mainWindow.isDestroyed()) {
+    return Promise.resolve(null);
+  }
+
+  return captureChatGptDomSnapshot({
+    label: label,
+    logger: logger,
+    outputDir: payload.remoteDebugDir,
+    requestId: payload.requestId,
+    webContents: mainWindow.webContents
+  });
+}
+
+function captureTranscribeRecorderProbeSnapshot(payload, label) {
+  if (!payload || !payload.remoteDebugDir || !mainWindow || mainWindow.isDestroyed()) {
+    return Promise.resolve(null);
+  }
+
+  return captureChatGptRecorderProbeSnapshot({
+    label: label,
+    logger: logger,
+    outputDir: payload.remoteDebugDir,
+    requestId: payload.requestId,
+    webContents: mainWindow.webContents
+  });
+}
+
 function clearNetworkTranscriptFallback() {
   if (networkTranscriptFallbackTimer) {
     clearTimeout(networkTranscriptFallbackTimer);
@@ -139,11 +181,58 @@ function clearNetworkTranscriptFallback() {
   pendingNetworkTranscript = null;
 }
 
+function clearAppRecordingState() {
+  pendingAppRecording = null;
+  latestAppRecording = null;
+}
+
+function withTimeout(promise, timeoutMs, fallback, onTimeout) {
+  if (!isPromiseLike(promise)) {
+    return Promise.resolve(promise);
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const timeout = setTimeout(function onPromiseTimeout() {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      if (typeof onTimeout === 'function') {
+        onTimeout();
+      }
+      resolve(fallback);
+    }, timeoutMs);
+
+    promise.then((result) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      clearTimeout(timeout);
+      resolve(result);
+    }).catch((error) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      clearTimeout(timeout);
+      resolve(Object.assign({}, fallback, {
+        error: getErrorMessage(error)
+      }));
+    });
+  });
+}
+
 function scheduleNetworkTranscriptFallback(payload) {
   clearNetworkTranscriptFallback();
 
   pendingNetworkTranscript = {
     requestId: String((payload && payload.requestId) || '').trim(),
+    remoteDebugDir: String((payload && payload.remoteDebugDir) || '').trim(),
     text: String((payload && payload.text) || '').trim()
   };
 
@@ -181,6 +270,8 @@ function scheduleNetworkTranscriptFallback(payload) {
       requestId: candidate.requestId,
       textLength: candidate.text.length
     });
+    captureTranscribeDomSnapshot(candidate, 'before-network-fallback-finalize');
+    captureTranscribeRecorderProbeSnapshot(candidate, 'before-network-fallback-finalize');
 
     if (transcriptPipeline) {
       transcriptPipeline.finalizeText(candidate.text, {
@@ -235,6 +326,144 @@ function clearChatGptInputBeforeStart(webContents) {
       resolve(false);
     });
   });
+}
+
+function installRecorderProbeBeforeStart(webContents) {
+  const installResult = installChatGptRecorderProbe({
+    logger: logger,
+    webContents: webContents
+  });
+
+  if (!isPromiseLike(installResult)) {
+    return installResult;
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const timeout = setTimeout(function onRecorderProbeInstallTimeout() {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      logger.warn('recorder_probe.install_timeout_continue', {
+        timeoutMs: RECORDER_PROBE_INSTALL_TIMEOUT_MS
+      });
+      resolve(false);
+    }, RECORDER_PROBE_INSTALL_TIMEOUT_MS);
+
+    installResult.then((result) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      clearTimeout(timeout);
+      resolve(result);
+    }).catch((error) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      clearTimeout(timeout);
+      logger.warn('recorder_probe.install_failed_continue', {
+        error: getErrorMessage(error)
+      });
+      resolve(false);
+    });
+  });
+}
+
+function isUploadReplacementEnabled() {
+  return Boolean(config.transcribe && config.transcribe.replaceUploadWithAppRecording);
+}
+
+function startAppRecorderBeforeStart(webContents) {
+  if (!isUploadReplacementEnabled()) {
+    clearAppRecordingState();
+    return Promise.resolve(false);
+  }
+
+  clearAppRecordingState();
+  const startResult = startChatGptAppRecorder({
+    logger: logger,
+    webContents: webContents
+  });
+
+  return withTimeout(startResult, APP_RECORDER_START_TIMEOUT_MS, {
+    ok: false,
+    error: 'app recorder start timeout'
+  }, function onAppRecorderStartTimeout() {
+    logger.warn('app_recorder.start_timeout_continue', {
+      timeoutMs: APP_RECORDER_START_TIMEOUT_MS
+    });
+  }).then((result) => {
+    if (!result || result.ok !== true) {
+      logger.warn('app_recorder.start_unavailable_continue', {
+        error: result && result.error ? result.error : '',
+        status: result && result.status ? result.status : ''
+      });
+    }
+    return result;
+  });
+}
+
+function stopAppRecorderAfterStop() {
+  if (!isUploadReplacementEnabled()) {
+    return Promise.resolve(null);
+  }
+
+  pendingAppRecording = stopChatGptAppRecorder({
+    logger: logger,
+    webContents: mainWindow && mainWindow.webContents
+  }).then((recording) => {
+    latestAppRecording = recording;
+    return recording;
+  });
+
+  return pendingAppRecording;
+}
+
+function getAppRecordingForUpload() {
+  if (!isUploadReplacementEnabled()) {
+    return Promise.resolve({
+      ok: false,
+      error: 'upload replacement disabled'
+    });
+  }
+
+  const waitMs = config.transcribe && config.transcribe.uploadReplacementWaitMs ?
+    config.transcribe.uploadReplacementWaitMs :
+    5000;
+
+  if (pendingAppRecording) {
+    return withTimeout(pendingAppRecording, waitMs, {
+      ok: false,
+      error: 'app recording wait timeout'
+    }, function onAppRecordingWaitTimeout() {
+      logger.warn('app_recorder.wait_timeout', {
+        timeoutMs: waitMs
+      });
+    });
+  }
+
+  if (latestAppRecording) {
+    return Promise.resolve(latestAppRecording);
+  }
+
+  return Promise.resolve({
+    ok: false,
+    error: 'app recording not available'
+  });
+}
+
+function prepareChatGptBeforeStart(webContents) {
+  return Promise.all([
+    installRecorderProbeBeforeStart(webContents),
+    startAppRecorderBeforeStart(webContents),
+    clearChatGptInputBeforeStart(webContents)
+  ]);
 }
 
 function deferStopUntilStartShortcutSent(bindingConfig) {
@@ -791,6 +1020,7 @@ function createDictationBridge(bindingConfig) {
         }
         if (context.action === 'stop') {
           dictationSession.markStopShortcutSent();
+          stopAppRecorderAfterStop();
         }
         if (context.overlayStateAfterSend) {
           sendMiniOverlayDictationState(context.overlayStateAfterSend);
@@ -870,7 +1100,7 @@ function createDictationBridge(bindingConfig) {
           startShortcutPending = true;
           playSoundAfterSend = true;
           overlayStateAfterSend = MINI_OVERLAY_STATES.LISTENING;
-          readyToSend = clearChatGptInputBeforeStart(mainWindow.webContents);
+          readyToSend = prepareChatGptBeforeStart(mainWindow.webContents);
         } else if (bindingConfig.action === 'stop') {
           logger.info('dictation.stop.before_send', {
             binding: bindingConfig.binding,
@@ -888,6 +1118,7 @@ function createDictationBridge(bindingConfig) {
           transcriptResultEnabled = false;
           resetShortcutCoordination();
           clearNetworkTranscriptFallback();
+          clearAppRecordingState();
           dictationSession.cancel();
           if (transcriptPipeline) {
             transcriptPipeline.discardPendingTranscript();
@@ -1009,6 +1240,7 @@ function registerTranscriptPipeline() {
     logger: logger,
     onError: function onTranscriptError(payload) {
       clearNetworkTranscriptFallback();
+      clearAppRecordingState();
       logger.error('transcript.pipeline.error', {
         message: payload.message,
         textLength: String(payload.text || '').length
@@ -1020,6 +1252,7 @@ function registerTranscriptPipeline() {
     },
     onFinalized: function onTranscriptFinalized(payload) {
       clearNetworkTranscriptFallback();
+      clearAppRecordingState();
       logger.info('transcript.finalized', {
         autoPaste: payload.autoPaste,
         pasted: payload.pasted,
@@ -1120,8 +1353,11 @@ function installTranscribeMonitor() {
         statusText: payload.statusText,
         url: payload.url
       });
+      captureTranscribeDomSnapshot(payload, 'after-transcribe-failed');
+      captureTranscribeRecorderProbeSnapshot(payload, 'after-transcribe-failed');
       dictationSession.reset();
       clearNetworkTranscriptFallback();
+      clearAppRecordingState();
       sendMiniOverlayDictationState(MINI_OVERLAY_STATES.ERROR, {
         message: 'ChatGPT 转写请求失败：' +
           (payload.errorText || payload.statusText || payload.statusCode || 'unknown')
@@ -1137,6 +1373,7 @@ function installTranscribeMonitor() {
       if (miniOverlayState === MINI_OVERLAY_STATES.PROCESSING && transcriptResultEnabled) {
         dictationSession.markTranscribeRequestStarted(payload);
       }
+      captureTranscribeRecorderProbeSnapshot(payload, 'on-transcribe-request-started');
     },
     onSucceeded: function onTranscribeSucceeded(payload) {
       if (!transcriptResultEnabled) {
@@ -1174,6 +1411,8 @@ function installTranscribeMonitor() {
           statusCode: payload && payload.statusCode,
           url: payload && payload.url
         });
+        captureTranscribeDomSnapshot(payload, 'after-transcribe-response-without-text');
+        captureTranscribeRecorderProbeSnapshot(payload, 'after-transcribe-response-without-text');
         return;
       }
 
@@ -1184,9 +1423,15 @@ function installTranscribeMonitor() {
         textLength: String(payload.text || '').length,
         url: payload.url
       });
+      captureTranscribeDomSnapshot(payload, 'after-transcribe-response');
+      captureTranscribeRecorderProbeSnapshot(payload, 'after-transcribe-response');
       scheduleNetworkTranscriptFallback(payload);
     },
     remoteDebugLogDir: path.join(config.userDataDir, 'remote-debug', 'transcribe'),
+    uploadReplacement: {
+      enabled: isUploadReplacementEnabled(),
+      getRecording: getAppRecordingForUpload
+    },
     webContents: mainWindow.webContents
   });
 
@@ -1209,6 +1454,7 @@ function boot() {
     sessionPartition: config.sessionPartition,
     shortcutsEnabled: config.shortcutsEnabled,
     startMode: config.startMode,
+    transcribe: config.transcribe,
     transcriptStableMs: config.transcriptStableMs,
     userDataDir: config.userDataDir
   });

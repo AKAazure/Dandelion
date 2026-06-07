@@ -44,13 +44,15 @@ npm start
 
 开始和结束 binding 默认都会在内嵌 ChatGPT 页面里触发 `Ctrl+Shift+D`。ChatGPT 当前网页听写行为更接近 toggle；如果以后确认网页有单独停止或发送快捷键，可以只改停止目标 chord。登录态保存在 `.runtime/dandelion-electron`。
 
-快捷键由 Electron `globalShortcut` 注册，可以在其他窗口 focus 时触发。默认 `mini` 模式下，屏幕右下角会显示一个 always-on-top、不可 focus 的声波 overlay；这个 overlay 可以拖动到任意屏幕，位置会保存到本地。内嵌 ChatGPT 主窗口保持隐藏。触发快捷键时，app 会把 ChatGPT 主窗口临时移到屏幕外并设成透明，等窗口激活和输入框清空完成后再发送网页快捷键，发送完成后恢复隐藏；正常听写不会把 ChatGPT 窗口闪到屏幕上。
+快捷键由 Electron `globalShortcut` 注册，可以在其他窗口 focus 时触发。默认 `mini` 模式下，屏幕右下角会显示一个 always-on-top、不可 focus 的声波 overlay；这个 overlay 可以拖动到任意屏幕，位置会保存到本地。内嵌 ChatGPT 主窗口保持隐藏。触发快捷键时，app 会把 ChatGPT 主窗口临时移到屏幕外并设成透明，等窗口激活和输入框清空完成后再发送网页快捷键，发送完成后恢复隐藏；正常听写不会把 ChatGPT 窗口闪到屏幕上。ChatGPT 主窗口的 `backgroundThrottling` 已关闭，避免隐藏/mini 模式下长录音被 Chromium 后台节流截短。
 
 点击右下角声波 overlay，或通过 tray 选择“显示登录/授权窗口”，会最大化到正常 ChatGPT 窗口。关闭 ChatGPT 窗口会回到 `mini` 模式。
 
 声波 overlay 只有在 `mini` 模式可见且状态为 `listening` 时才读取本地麦克风电平；待机、处理中、成功、失败状态都不会读取本地 mic，也不会显示声波。ChatGPT 自己的录音仍然由网页控制。
 
 开始听写时 app 会先清空当前 ChatGPT 输入栏，然后触发网页端听写快捷键；提示音和 overlay 的 listening 状态会在快捷键实际发送后触发。之后 app 会等待 ChatGPT 页面发起 `media` 权限请求，把它作为“网页端确实尝试开始听写”的确认信号。如果短时间内没有看到这个信号，会自动重试一次开始快捷键，并写入 `dictation.start.unconfirmed_retry` 日志。
+
+当前配置已显式开启 `transcribe.replaceUploadWithAppRecording`。开启后，start 前 app 会在 ChatGPT 页面里启动一条独立 `MediaRecorder`，stop 后导出 app 自己录到的 `webm`；当 ChatGPT 发出 `/backend-api/transcribe` request 时，CDP Fetch 会先 pause 这条 request，并把 multipart body 里的 `file` part 替换成 app 录音。替换失败、录音不可用或 request shape 不匹配时，app 会放行 ChatGPT 原始 request，不会卡住本轮听写。
 
 听写中或处理中按 `Escape` 会取消本轮听写：app 会把 `Escape` 发送给 ChatGPT 页面，清空当前输入栏，丢弃本轮候选文本和后续返回的 transcribe response，不复制、不粘贴、不保存。`Escape` 平时不会作为全局快捷键注册，避免影响游戏或其他应用。
 
@@ -68,7 +70,7 @@ npm start
 
 app 会默认写本地日志到 `.runtime/dandelion-electron/logs/app-YYYY-MM-DD.log`。日志用于排查快捷键、窗口、权限、transcribe request、overlay、提示音和 pipeline 状态；默认级别是 `info`，不会记录常规 permission 细节。需要深挖时可以把 `logging.level` 改成 `debug`。普通日志默认不记录 transcript 原文，只记录文本长度，默认保留 7 天，托盘菜单里可以直接打开日志目录。
 
-transcribe remote 细节会额外写到 `remote-debug/transcribe/<timestamp>/<requestId>/`。packaged app 路径是 `%APPDATA%\Dandelion\remote-debug\transcribe\...`，开发模式路径是 `.runtime/dandelion-electron/remote-debug/transcribe/...`。这些文件用于排查 remote HTTP/CDP 行为，会保存 request/response headers、postData、response body 和解析出的 transcript，不做普通日志 redaction。
+transcribe remote 细节会额外写到 `remote-debug/transcribe/<timestamp>/<requestId>/`。packaged app 路径是 `%APPDATA%\Dandelion\remote-debug\transcribe\...`，开发模式路径是 `.runtime/dandelion-electron/remote-debug/transcribe/...`。这些文件用于排查 remote HTTP/CDP 行为，会保存 request/response headers、postData、response body、解析出的 transcript、DOM snapshot、recorder probe、app recording 和 replacement decision，不做普通日志 redaction。
 
 ## 配置
 
@@ -90,6 +92,10 @@ transcribe remote 细节会额外写到 `remote-debug/transcribe/<timestamp>/<re
     "enabled": true,
     "level": "info",
     "retentionDays": 7
+  },
+  "transcribe": {
+    "replaceUploadWithAppRecording": false,
+    "uploadReplacementWaitMs": 5000
   },
   "autoPasteTranscript": true,
   "transcriptStableMs": 2500,
@@ -130,6 +136,8 @@ binding 支持 `F1`、`F2`、`Ctrl+F1`、`Alt+Shift+R` 这类 Electron accelerat
 - `DANDELION_LOG_ENABLED`：是否写本地日志，默认 `true`。
 - `DANDELION_LOG_LEVEL`：日志级别，默认 `info`；支持 `debug`、`info`、`warn`、`error`。
 - `DANDELION_LOG_RETENTION_DAYS`：日志保留天数，默认 `7`。
+- `DANDELION_REPLACE_UPLOAD_WITH_APP_RECORDING`：是否用 app 侧录音替换 ChatGPT transcribe upload，默认 `false`。
+- `DANDELION_UPLOAD_REPLACEMENT_WAIT_MS`：Fetch pause 后最多等待 app 录音导出的时间，默认 `5000`。
 - `DANDELION_TRANSCRIPT_STABLE_MS`：文本稳定多久后视为听写完成，默认 `2500`。
 - `DANDELION_AUTO_PASTE`：完成后是否自动粘贴，默认 `true`；设为 `false` 时只复制到剪贴板。
 
@@ -166,6 +174,10 @@ app icon 使用 [`assets/logo.png`](assets/logo.png)，包括窗口图标和 Win
 - 设计说明：[`.doc/modules/chatgpt-shortcut-bridge.md`](.doc/modules/chatgpt-shortcut-bridge.md)
 - app runtime 说明：[`.doc/modules/electron-app-runtime.md`](.doc/modules/electron-app-runtime.md)
 - app logging 说明：[`.doc/modules/app-logging.md`](.doc/modules/app-logging.md)
+- ChatGPT app recorder 说明：[`.doc/modules/chatgpt-app-recorder.md`](.doc/modules/chatgpt-app-recorder.md)
+- ChatGPT DOM snapshot 说明：[`.doc/modules/chatgpt-dom-snapshot.md`](.doc/modules/chatgpt-dom-snapshot.md)
+- ChatGPT recorder probe 说明：[`.doc/modules/chatgpt-recorder-probe.md`](.doc/modules/chatgpt-recorder-probe.md)
+- ChatGPT upload replacement 说明：[`.doc/modules/chatgpt-upload-replacement.md`](.doc/modules/chatgpt-upload-replacement.md)
 - dictation session 说明：[`.doc/modules/dictation-session.md`](.doc/modules/dictation-session.md)
 - mini overlay 说明：[`.doc/modules/mini-overlay.md`](.doc/modules/mini-overlay.md)
 - ChatGPT transcribe monitor 说明：[`.doc/modules/chatgpt-transcribe-monitor.md`](.doc/modules/chatgpt-transcribe-monitor.md)

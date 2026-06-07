@@ -42,6 +42,7 @@ function run() {
   const options = buildMainWindowOptions('/tmp/preload.js', '/tmp/logo.png');
   assert.strictEqual(options.icon, '/tmp/logo.png');
   assert.strictEqual(options.show, false);
+  assert.strictEqual(options.webPreferences.backgroundThrottling, false);
   assert.strictEqual(options.webPreferences.preload, '/tmp/preload.js');
   assert.strictEqual(options.webPreferences.partition, 'persist:chatgpt');
 

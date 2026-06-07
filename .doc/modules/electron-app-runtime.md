@@ -14,7 +14,11 @@
 - [`../../src/main/miniOverlayWindow.js`](../../src/main/miniOverlayWindow.js)
 - [`../../src/main/windowModes.js`](../../src/main/windowModes.js)
 - [`../../src/main/permissions.js`](../../src/main/permissions.js)
+- [`../../src/main/chatgptAppRecorder.js`](../../src/main/chatgptAppRecorder.js)
+- [`../../src/main/chatgptDomSnapshot.js`](../../src/main/chatgptDomSnapshot.js)
+- [`../../src/main/chatgptRecorderProbe.js`](../../src/main/chatgptRecorderProbe.js)
 - [`../../src/main/chatgptTranscribeMonitor.js`](../../src/main/chatgptTranscribeMonitor.js)
+- [`../../src/main/chatgptUploadReplacement.js`](../../src/main/chatgptUploadReplacement.js)
 - [`../../src/preload/chatgptPreload.js`](../../src/preload/chatgptPreload.js)
 - [`../../src/preload/miniOverlayPreload.js`](../../src/preload/miniOverlayPreload.js)
 - [`../../src/renderer/miniOverlay.html`](../../src/renderer/miniOverlay.html)
@@ -74,6 +78,10 @@ npm test
     "level": "info",
     "retentionDays": 7
   },
+  "transcribe": {
+    "replaceUploadWithAppRecording": false,
+    "uploadReplacementWaitMs": 5000
+  },
   "autoPasteTranscript": true,
   "transcriptStableMs": 2500,
   "startMode": "mini"
@@ -98,6 +106,8 @@ npm test
 | `DANDELION_LOG_ENABLED` | `true` | 是否写入本地 log |
 | `DANDELION_LOG_LEVEL` | `info` | 本地 log 级别；需要排查 permission、窗口和 bridge 细节时改成 `debug` |
 | `DANDELION_LOG_RETENTION_DAYS` | `7` | 本地 log 保留天数 |
+| `DANDELION_REPLACE_UPLOAD_WITH_APP_RECORDING` | `false` | 是否用 app 自己录的 `webm` 替换 ChatGPT transcribe upload 的 file part |
+| `DANDELION_UPLOAD_REPLACEMENT_WAIT_MS` | `5000` | CDP Fetch pause 后最多等 app recorder 导出结果的时间 |
 | `DANDELION_TARGET_CHORD` | 无 | 旧配置名，作为开始/结束 target chord fallback |
 | `DANDELION_SESSION_PARTITION` | `persist:chatgpt` | Electron 持久 session partition |
 | `DANDELION_START_MODE` | `mini` | 默认窗口模式 |
@@ -199,6 +209,7 @@ sequenceDiagram
   participant Overlay as Mini Overlay
   participant Page as ChatGPT WebContents
   participant Monitor as Transcribe Monitor
+  participant Session as Dictation Session
   participant Preload
   participant Clipboard
   participant Target as Current Foreground App
@@ -219,6 +230,10 @@ sequenceDiagram
   end
   Main->>Page: focus ChatGPT WebContents
   alt start binding
+    Main->>Page: install recorder probe
+    opt upload replacement enabled
+      Main->>Page: start app MediaRecorder
+    end
     Main->>Page: clear ChatGPT input box
     opt clear input stalls
       Main->>Main: continue after 1000ms
@@ -241,6 +256,9 @@ sequenceDiagram
       Main->>Overlay: send processing state
       Main->>Session: markStopShortcutSent()
       Main->>Session: start dynamic request timeout
+      opt upload replacement enabled
+        Main->>Page: stop app MediaRecorder and export webm
+      end
     end
   else cancel binding
     Bridge->>Page: sendInputEvent configured target chord
@@ -254,12 +272,23 @@ sequenceDiagram
     Main->>Window: hide and restore opacity
   end
   alt start or stop binding
+  opt start binding
+    Main->>Window: install recorder probe, start app recorder, and clear input
+  end
   Page-->>User: ChatGPT starts or toggles dictation
+  opt upload replacement enabled
+    Page->>Monitor: Fetch.requestPaused for /backend-api/transcribe
+    Monitor->>Main: wait for app recording result
+    Monitor->>Monitor: replace multipart file part
+    Monitor->>Page: Fetch.continueRequest with replaced postData
+  end
   Page->>Monitor: POST /backend-api/transcribe
   Monitor->>Main: onStarted(remoteDebugDir)
   Main->>Session: markTranscribeRequestStarted()
+  Main->>Main: write recorder probe snapshot
   Main->>Session: clear request timeout and wait for response
   Monitor->>Main: onSucceeded({ text, remoteDebugDir })
+  Main->>Main: write DOM and recorder probe snapshots
   Main->>Main: schedule network transcript fallback
   opt DOM transcript arrives before fallback
   Main->>Main: clear network fallback
@@ -272,6 +301,7 @@ sequenceDiagram
   Main->>Target: send Ctrl+V on Windows
   end
   opt DOM transcript does not arrive
+  Main->>Main: write DOM and recorder probe snapshots
   Main->>Main: finalize network fallback after 5000ms
   Main->>Clipboard: write transcript text
   Main->>Main: save last transcript to userData
@@ -338,10 +368,11 @@ sequenceDiagram
 - mini overlay 只有在 `mini` 模式可见且状态为 `listening` 时，才通过本地 `file://` UI 读取麦克风电平来显示声波；待机、处理中、成功、失败和其他窗口模式都会停止本地 mic tracks。这个本地 UI 位于 app root 内，由 permission handler 自动放行；如果系统层面拒绝麦克风，overlay 会退回到非真实音量的 fallback 动画。overlay 支持拖动到任意屏幕，位置保存到 `userData/mini-overlay-placement.json`，屏幕布局变化后会 clamp 到最近可用 display。
 - ChatGPT transcribe monitor 使用 `webContents.debugger` 监听网页实际 transcribe request，并读取 response body 作为优先完成信号；如果 debugger 被 DevTools 或其他工具占用，会记录 warning 并退回 DOM 观察器。
 - transcript DOM 观察器现在优先于 network 候选结果完成。network monitor 成功后会先 schedule 一个 `5000ms` fallback；如果 DOM transcript 在这期间到达并进入 pipeline，就清掉 network fallback。这样可以避免 network response 先返回截断文本时过早 `transcript.finalized`。
-- transcribe monitor 会为每条 remote request 写 raw artifact，并在 `transcribe.started`、`transcribe.succeeded`、`transcribe.failed` 普通日志里带上 `remoteDebugDir`。packaged app 的目录是 `%APPDATA%\Dandelion\remote-debug\transcribe\<timestamp>\<requestId>\`；这里保存 CDP request/response events、request post data、response body 和解析出的 transcript。
+- transcribe monitor 会为每条 remote request 写 raw artifact，并在 `transcribe.started`、`transcribe.succeeded`、`transcribe.failed` 普通日志里带上 `remoteDebugDir`。packaged app 的目录是 `%APPDATA%\Dandelion\remote-debug\transcribe\<timestamp>\<requestId>\`；这里保存 CDP request/response events、request post data、response body、解析出的 transcript、DOM snapshot、recorder probe snapshot、app recording 和 replacement decision。
 - Windows 粘贴使用 PowerShell `System.Windows.Forms.SendKeys` 发出 `Ctrl+V`。如果目标应用或游戏使用管理员权限、独占输入或屏蔽模拟按键，可能需要让本 app 以相同权限运行。
-- 为了让 ChatGPT 页面收到网页快捷键，app 会在触发时 focus 内嵌 `WebContents`，然后通过 Win32 `SetForegroundWindow` 尝试恢复之前的前台窗口。`hidden` 和 `mini` 模式下窗口会先移到屏幕外、设为完全透明并使用 `showInactive` 激活，等待 `220ms` 后再发送快捷键，发送后立刻恢复隐藏，所以正常听写不会把 ChatGPT 窗口闪到屏幕上。某些管理员权限窗口、独占全屏游戏或输入保护软件可能拒绝恢复焦点。
-- 开始听写会先通过页面脚本清空 ChatGPT 当前输入栏。Windows `SystemSounds.Asterisk` 和 mini overlay listening 状态会在网页快捷键实际发送后触发。之后 session 会等待 ChatGPT trusted `media` permission request；如果短时间内没有看到这个网页端开始信号，会自动重试一次 start。
+- 为了让 ChatGPT 页面收到网页快捷键，app 会在触发时 focus 内嵌 `WebContents`，然后通过 Win32 `SetForegroundWindow` 尝试恢复之前的前台窗口。`hidden` 和 `mini` 模式下窗口会先移到屏幕外、设为完全透明并使用 `showInactive` 激活，等待 `220ms` 后再发送快捷键，发送后立刻恢复隐藏，所以正常听写不会把 ChatGPT 窗口闪到屏幕上。ChatGPT 主窗口设置了 `webPreferences.backgroundThrottling=false`，避免隐藏/mini 模式下 `MediaRecorder` 长录音被 Chromium 后台节流截短。某些管理员权限窗口、独占全屏游戏或输入保护软件可能拒绝恢复焦点。
+- 开始听写会先通过页面脚本安装 recorder probe；如果 `transcribe.replaceUploadWithAppRecording=true`，还会启动 app 自己的页面侧 `MediaRecorder`，然后清空 ChatGPT 当前输入栏。recorder probe 最多等待 `1000ms`，app recorder start 最多等待 `2000ms`，超时后继续发送 start。Windows `SystemSounds.Asterisk` 和 mini overlay listening 状态会在网页快捷键实际发送后触发。之后 session 会等待 ChatGPT trusted `media` permission request；如果短时间内没有看到这个网页端开始信号，会自动重试一次 start。
 - 结束听写只有在 session 处于 `listening` 时才会向网页发送 stop；否则会 `skipSend`，避免同一个 `Ctrl+Shift+D` toggle 反向启动网页听写。stop 后会把 overlay 切到 `processing`，并按本轮听写时长启动线性 request timeout：默认 `15s + listeningDuration`。这样 `30s` 听写会等待 `45s`，`61s` 听写会等待约 `76.0s`，`86s` 听写会等待约 `100.6s`，`113s` 听写会等待约 `128.1s`。这个 timeout 只判断有没有看到 transcribe request。一旦看到 request，就清理 timeout，并继续等待 network response、DOM fallback、用户取消或明确失败。network response 只有在当前 session 已经进入 `waiting_response`，且 `requestId` 与本轮观察到的 transcribe request 一致时才会成为 fallback 候选；DOM fallback 也只会在 stop 之后的 `processing / waiting_response` 阶段生效。完成后切到 `success`，显示 `√` 和最终文本；没有 request、transcribe 失败或 pipeline 失败时切到 `error`，显示可选择、可复制的错误文本。
+- 开启 upload replacement 后，stop 会停止 app recorder 并导出 `webm`。ChatGPT transcribe request 在 request stage 被 CDP Fetch pause；如果 app recording 可用，monitor 替换 multipart `name="file"` part 并继续 request；如果不可用或 request body 无法识别，会写 `request-replacement-decision.json` 后放行原始 request。
 - 取消听写的 `Escape` binding 只在 `listening` / `processing` 状态临时注册。取消后会向 ChatGPT 发送 `Escape`，清空输入栏，回到 `idle`，并忽略本轮后续 DOM/network transcript。
 - transcript 默认稳定 `2500ms` 后才会复制和粘贴，最后完成文本会保存到 `last-transcript.json`，下次启动会自动恢复到剪贴板。

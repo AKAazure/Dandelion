@@ -6,7 +6,10 @@
 
 - [`../src/main/main.js`](../src/main/main.js)
 - [`../src/main/dictationSession.js`](../src/main/dictationSession.js)
+- [`../src/main/chatgptAppRecorder.js`](../src/main/chatgptAppRecorder.js)
 - [`../src/main/chatgptTranscribeMonitor.js`](../src/main/chatgptTranscribeMonitor.js)
+- [`../src/main/chatgptRecorderProbe.js`](../src/main/chatgptRecorderProbe.js)
+- [`../src/main/chatgptUploadReplacement.js`](../src/main/chatgptUploadReplacement.js)
 - [`../src/main/transcriptPipeline.js`](../src/main/transcriptPipeline.js)
 
 ## 1. 总览
@@ -28,7 +31,7 @@ flowchart TD
 
   J --> M{session idle and no start pending?}
   M -->|no| N[skip duplicate start]
-  M -->|yes| O[prepare window and clear ChatGPT input]
+  M -->|yes| O[prepare window, install recorder probe, start app recorder, clear ChatGPT input]
   O --> P[send ChatGPT target chord]
   P --> Q[session: listening]
   Q --> R[wait for trusted media request]
@@ -38,8 +41,13 @@ flowchart TD
   S -->|no| U{session can stop?}
   U -->|no| V[skip stop]
   U -->|yes| W[send ChatGPT target chord]
-  W --> X[session: processing]
-  X --> Y[wait for transcribe request]
+  W --> W2[stop app recorder if replacement enabled]
+  W2 --> X[session: processing]
+  X --> Y0[ChatGPT begins transcribe upload]
+  Y0 --> AC2{upload replacement enabled?}
+  AC2 -->|yes| AC3[Fetch pause, replace multipart file, continue request]
+  AC2 -->|no| Y[wait for Network transcribe request]
+  AC3 --> Y
 
   T --> P
   Y --> Z{request observed before timeout?}
@@ -98,6 +106,7 @@ sequenceDiagram
   participant Page as ChatGPT Page
   participant Session as Dictation Session
   participant Overlay
+  participant Recorder as App Recorder
 
   User->>Bridge: press start binding
   Bridge->>Main: beforeSend(start)
@@ -107,7 +116,14 @@ sequenceDiagram
   else can start
     Main->>Main: startShortcutPending = true
     Main->>Window: prepare hidden or visible window
+    Main->>Page: install recorder probe
+    opt upload replacement enabled
+      Main->>Recorder: start app MediaRecorder in ChatGPT page
+    end
     Main->>Page: clear input
+    opt recorder probe install does not finish in 1000ms
+      Main->>Main: log recorder_probe.install_timeout_continue
+    end
     opt clear input does not finish in 1000ms
       Main->>Main: log dictation.start.clear_input_timeout_continue
     end
@@ -135,6 +151,9 @@ sequenceDiagram
     Bridge->>Page: send target chord
     Bridge->>Main: afterSend(stop)
     Main->>Session: markStopShortcutSent()
+    opt upload replacement enabled
+      Main->>Recorder: stop app MediaRecorder and export webm
+    end
     Main->>Overlay: processing
   end
 ```
@@ -151,6 +170,8 @@ sequenceDiagram
 sequenceDiagram
   participant Page as ChatGPT Page
   participant Monitor as Transcribe Monitor
+  participant Fetch as CDP Fetch
+  participant Recorder as App Recorder
   participant Main
   participant Session as Dictation Session
   participant Pipeline as Transcript Pipeline
@@ -162,15 +183,32 @@ sequenceDiagram
   Main->>Session: markStopShortcutSent()
   Session->>Session: listeningDurationMs = now - start time
   Session->>Session: timeoutMs = baseTimeout + listeningDurationMs
+  opt upload replacement enabled
+    Main->>Recorder: stop and export app-recording.webm
+  end
+  opt upload replacement enabled
+    Page->>Fetch: POST /backend-api/transcribe paused
+    Fetch->>Monitor: Fetch.requestPaused
+    Monitor->>Main: wait for app recording up to uploadReplacementWaitMs
+    alt app recording available and multipart file found
+      Monitor->>Monitor: write app-recording and replacement artifacts
+      Monitor->>Fetch: continueRequest with replaced postData
+    else replacement unavailable
+      Monitor->>Monitor: write request-replacement-decision.json
+      Monitor->>Fetch: continueRequest original request
+    end
+  end
   Page->>Monitor: POST /backend-api/transcribe
   Monitor->>Main: onStarted(requestId)
   Monitor->>Monitor: write request-will-be-sent and request-post-data artifacts
+  Main->>Main: write recorder-probe-on-transcribe-request-started artifact
   Main->>Session: markTranscribeRequestStarted(requestId)
   Session->>Session: phase = waiting_response
 
   alt network succeeds and requestId matches
     Monitor->>Monitor: write response-received/loading-finished/response-body artifacts
     Monitor->>Main: onSucceeded(text, requestId)
+    Main->>Main: write DOM and recorder-probe after-response artifacts
     Main->>Main: schedule network fallback for 5000ms
     alt DOM transcript arrives first
       Main->>Main: clear network fallback
@@ -183,6 +221,7 @@ sequenceDiagram
       Main->>Session: reset()
       Main->>Overlay: success with text
     else DOM transcript does not arrive
+      Main->>Main: write DOM and recorder-probe before-fallback artifacts
       Main->>Pipeline: finalizeText(networkText, force=true)
       Pipeline->>Clipboard: write transcript
       Pipeline->>Disk: save last transcript
@@ -207,7 +246,7 @@ sequenceDiagram
 - `transcribe.succeeded`：network monitor 已经拿到并解析 ChatGPT transcribe response；它现在只会 schedule 一个 network fallback，不会马上落盘。
 - `transcript.finalized`：本地 pipeline 已经写 clipboard、保存 `last-transcript.json`，并按配置粘贴到前台 app。
 
-每条 remote request 的完整 CDP artifact 会写到 `remote-debug/transcribe/<timestamp>/<requestId>/`。普通日志里的 `remoteDebugDir` 指向这个目录。
+每条 remote request 的完整 CDP artifact 会写到 `remote-debug/transcribe/<timestamp>/<requestId>/`。普通日志里的 `remoteDebugDir` 指向这个目录。当前还会在同一目录写 DOM snapshot、recorder probe、app recording 和 replacement decision，用来判断 ChatGPT 页面里是否有更长文本、页面侧 `MediaRecorder` / `FormData` / `fetch` 链路有没有先丢音频，以及本轮 request 最终有没有被 app 录音替换。
 
 ## 5. Cancel 分支
 
@@ -241,10 +280,12 @@ cancel 会清理 main coordination 状态，因此 pending start 或 deferred st
 
 ```text
 dictation.start.before_send
+app_recorder.started
 dictation.start.sent_waiting_for_media_request
 dictation.start.confirmed
 dictation.stop.before_send
 dictation.stop.sent_waiting_for_transcribe_request
+app_recorder.stopped
 transcribe.started
 dictation.transcribe_request.observed
 transcribe.succeeded
@@ -291,9 +332,12 @@ mini_overlay.state.changed error
 
 - main coordination 状态：[`../src/main/main.js`](../src/main/main.js) 的 `startShortcutPending`、`stopAfterPendingStart`。
 - start 清空输入兜底：[`../src/main/main.js`](../src/main/main.js) 的 `clearChatGptInputBeforeStart()`。
+- app 侧录音：[`../src/main/chatgptAppRecorder.js`](../src/main/chatgptAppRecorder.js) 注入页面 `MediaRecorder`，stop 后导出 base64 `webm`。
+- recorder probe：[`../src/main/chatgptRecorderProbe.js`](../src/main/chatgptRecorderProbe.js) 注入页面主 world，记录 `MediaRecorder` / `FormData` / `fetch` 摘要。
 - deferred stop：[`../src/main/main.js`](../src/main/main.js) 的 `deferStopUntilStartShortcutSent()` 和 `triggerDeferredStopAfterStart()`。
 - start / stop beforeSend 和 afterSend：[`../src/main/main.js`](../src/main/main.js) 的 `createDictationBridge()`。
 - session phase 转换：[`../src/main/dictationSession.js`](../src/main/dictationSession.js) 的 `markStartShortcutSent()`、`markStopShortcutSent()`、`markTranscribeRequestStarted()`。
 - network request 和 requestId matching：[`../src/main/main.js`](../src/main/main.js) 的 `installTranscribeMonitor()`。
 - remote raw artifact：[`../src/main/chatgptTranscribeMonitor.js`](../src/main/chatgptTranscribeMonitor.js) 写入 `remote-debug/transcribe`。
+- upload replacement：[`../src/main/chatgptUploadReplacement.js`](../src/main/chatgptUploadReplacement.js) 替换 multipart `name="file"` part；[`../src/main/chatgptTranscribeMonitor.js`](../src/main/chatgptTranscribeMonitor.js) 负责 CDP Fetch pause / continue。
 - clipboard、保存和粘贴：[`../src/main/transcriptPipeline.js`](../src/main/transcriptPipeline.js)。

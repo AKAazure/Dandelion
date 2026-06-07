@@ -53,7 +53,7 @@
 
 ### `buildWebKeyEvents(chord)`
 
-生成发送给 `webContents.sendInputEvent` 的 `keyDown` / `keyUp` 两个事件。
+生成发送给 `webContents.sendInputEvent` 的一个 `rawKeyDown` 事件。当前不发送 `keyUp`，因为 ChatGPT 听写入口只需要快捷键按下阶段；少发释放阶段可以避免页面把 stop 的 key release 解释成额外输入。
 
 ## Flowchart
 
@@ -72,10 +72,9 @@ flowchart TD
   Q -- no --> J{focusBeforeSend?}
   J -- yes --> K[focus webContents]
   J -- no --> L[keep current foreground focus]
-  K --> M[send keyDown configured target chord]
+  K --> M[send rawKeyDown configured target chord]
   L --> M
-  M --> N[send keyUp configured target chord]
-  N --> O[afterSend hook]
+  M --> O[afterSend hook]
   O --> P[ChatGPT page handles dictation shortcut]
 ```
 
@@ -101,8 +100,7 @@ sequenceDiagram
     opt focusBeforeSend
       Bridge->>Page: focus()
     end
-    Bridge->>Page: sendInputEvent(keyDown target chord)
-    Bridge->>Page: sendInputEvent(keyUp target chord)
+    Bridge->>Page: sendInputEvent(rawKeyDown target chord)
     Bridge->>Host: afterSend()
     Page-->>User: ChatGPT starts or toggles dictation
   end
@@ -144,7 +142,7 @@ bridge.stop();
 
 - 用户 binding 标准化。
 - 目标网页组合键标准化。
-- `keyDown` / `keyUp` 事件生成。
+- `rawKeyDown` 事件生成。
 - `Escape` binding 和网页 `Escape` 事件生成。
 - 自定义 binding 触发后发送 `Ctrl+Shift+D` 到网页。
 - 默认不 focus 网页，按需可启用 `focusBeforeSend`。

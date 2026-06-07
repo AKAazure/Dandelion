@@ -236,7 +236,10 @@ function normalizeWebModifiers(modifiers) {
 }
 
 /**
- * 构造触发 ChatGPT 页面级快捷键所需的 keyDown/keyUp 事件。
+ * 构造触发 ChatGPT 页面级快捷键所需的 rawKeyDown 事件。
+ *
+ * ChatGPT 的听写入口只需要快捷键按下阶段。这里不发送 keyUp，避免页面在
+ * 停止录音时把释放阶段也解释成一次额外的快捷键输入。
  *
  * @param {{ keyCode: string, modifiers: string[] }} chord 标准化后的 web chord。
  * @returns {Array<object>} Electron input events。
@@ -246,12 +249,7 @@ function buildWebKeyEvents(chord) {
 
   return [
     {
-      type: 'keyDown',
-      keyCode: normalizedChord.keyCode,
-      modifiers: normalizedChord.modifiers.slice()
-    },
-    {
-      type: 'keyUp',
+      type: 'rawKeyDown',
       keyCode: normalizedChord.keyCode,
       modifiers: normalizedChord.modifiers.slice()
     }

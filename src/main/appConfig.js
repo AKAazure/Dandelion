@@ -25,6 +25,8 @@ const DEFAULT_CONFIG = {
   loggingEnabled: true,
   loggingLevel: DEFAULT_LOG_LEVEL,
   loggingRetentionDays: DEFAULT_RETENTION_DAYS,
+  replaceUploadWithAppRecording: false,
+  uploadReplacementWaitMs: 5000,
   transcriptStableMs: 2500,
   userDataDirName: 'dandelion-electron'
 };
@@ -473,6 +475,34 @@ function loadAppConfig(env, argv) {
           DEFAULT_CONFIG.loggingRetentionDays
         )
       ))
+    },
+    transcribe: {
+      replaceUploadWithAppRecording: readBooleanEnv(
+        sourceEnv,
+        'DANDELION_REPLACE_UPLOAD_WITH_APP_RECORDING',
+        readBooleanEnv(
+          sourceEnv,
+          'GENERAL_STT_REPLACE_UPLOAD_WITH_APP_RECORDING',
+          readConfigBoolean(
+            fileConfig,
+            ['transcribe', 'replaceUploadWithAppRecording'],
+            DEFAULT_CONFIG.replaceUploadWithAppRecording
+          )
+        )
+      ),
+      uploadReplacementWaitMs: readPositiveIntEnv(
+        sourceEnv,
+        'DANDELION_UPLOAD_REPLACEMENT_WAIT_MS',
+        readPositiveIntEnv(
+          sourceEnv,
+          'GENERAL_STT_UPLOAD_REPLACEMENT_WAIT_MS',
+          readConfigPositiveInt(
+            fileConfig,
+            ['transcribe', 'uploadReplacementWaitMs'],
+            DEFAULT_CONFIG.uploadReplacementWaitMs
+          )
+        )
+      )
     },
     sessionPartition: readEnvFirst(sourceEnv, [
       'DANDELION_SESSION_PARTITION',

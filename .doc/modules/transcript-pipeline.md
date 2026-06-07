@@ -6,12 +6,19 @@ Transcript pipeline 负责把 ChatGPT 语音转写文本送回系统当前输入
 
 - network monitor：读取 ChatGPT transcribe response body，把文本交给 main process 作为候选兜底。
 - preload：在 ChatGPT 页面中观察 DOM，提取输入框或最新用户消息文本，优先作为最终 transcript 来源。
+- app recorder / upload replacement：可选地用 app 自己录到的 `webm` 替换 ChatGPT transcribe request 里的上传音频。它影响 remote STT 的输入音频，但不直接产生最终文本。
+- DOM snapshot：network response 之后写入排障 artifact，记录页面里当时的 input/user-message 候选文本；它只用于诊断，不参与最终文本选择。
+- recorder probe：start 前注入页面主 world，记录 ChatGPT 自己的 recorder lifecycle 和 upload body 摘要；它只用于诊断上传音频是否短于 app 记录时长，不参与最终文本选择。
 
 main process pipeline 统一负责去重、写剪贴板、保存最后完成文本、触发 Windows `Ctrl+V`。DOM 来源会先等待文本稳定；network 来源不再立即完成，而是在 DOM 没有接管时作为延迟兜底，避免 ChatGPT network response 先返回截断文本时过早 finalize。
 
 相关文件：
 
 - [`../../src/preload/chatgptPreload.js`](../../src/preload/chatgptPreload.js)
+- [`../../src/main/chatgptAppRecorder.js`](../../src/main/chatgptAppRecorder.js)
+- [`../../src/main/chatgptDomSnapshot.js`](../../src/main/chatgptDomSnapshot.js)
+- [`../../src/main/chatgptRecorderProbe.js`](../../src/main/chatgptRecorderProbe.js)
+- [`../../src/main/chatgptUploadReplacement.js`](../../src/main/chatgptUploadReplacement.js)
 - [`../../src/main/transcriptPipeline.js`](../../src/main/transcriptPipeline.js)
 - [`../../src/main/windowsPaste.js`](../../src/main/windowsPaste.js)
 - [`../../src/main/foregroundWindow.js`](../../src/main/foregroundWindow.js)
@@ -73,7 +80,8 @@ flowchart TD
   P[User presses active Escape cancel] --> Q[discard pending candidate]
   Q --> E
   M[ChatGPT transcribe response] --> N[extract final text]
-  N --> O{has text?}
+  N --> R[write DOM snapshot artifact]
+  R --> O{has text?}
   O -- no --> E
   O -- yes --> J
 ```
@@ -93,8 +101,10 @@ sequenceDiagram
   alt network response path
     Page->>Monitor: transcribe response body
     Monitor->>Main: onSucceeded({ text })
+    Main->>Page: capture DOM snapshot artifact
     Main->>Main: schedule network fallback
     opt DOM does not provide a candidate
+      Main->>Page: capture DOM snapshot before fallback finalize
       Main->>Pipeline: finalizeText(text, { force: true })
     end
   else DOM fallback path
