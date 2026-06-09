@@ -2,6 +2,8 @@
 
 const childProcess = require('child_process');
 
+const DEFAULT_CAPTURE_FOREGROUND_WINDOW_TIMEOUT_MS = 750;
+
 function buildCaptureForegroundWindowCommand() {
   return [
     '$signature = \'[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();\';',
@@ -47,26 +49,49 @@ function normalizeWindowHandle(handle) {
   return normalized;
 }
 
+function normalizePositiveTimeoutMs(value, fallback) {
+  const parsed = Number.parseInt(value, 10);
+
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+
+  return parsed;
+}
+
 /**
  * 捕获当前 Windows 前台窗口 HWND。
  *
- * 非 Windows 环境返回空字符串，方便测试和开发环境运行。这个函数只读取
- * 前台窗口，不改变焦点。
+ * 非 Windows 环境返回空字符串，方便测试和开发环境运行。这个函数只读取前台
+ * 窗口，不改变焦点。Windows 上 PowerShell 偶尔可能被系统策略、AMSI 或启动
+ * 开销拖住；这里给同步调用设置硬 timeout，避免全局快捷键回调被永久卡住。
  *
+ * @param {object} [options] 可选依赖和 timeout 设置，主要用于测试。
+ * @param {object} [options.childProcess] child_process 兼容对象。
+ * @param {string} [options.platform] Node platform 字符串。
+ * @param {number} [options.timeoutMs] PowerShell 同步调用 timeout。
  * @returns {string} 当前前台窗口 HWND；失败时返回空字符串。
  */
-function captureForegroundWindow() {
-  if (!canUseForegroundWindowApi()) {
+function captureForegroundWindow(options) {
+  const opts = options || {};
+
+  if (!canUseForegroundWindowApi(opts.platform)) {
     return '';
   }
 
-  const result = childProcess.spawnSync('powershell.exe', [
+  const childProcessApi = opts.childProcess || childProcess;
+  const timeoutMs = normalizePositiveTimeoutMs(
+    opts.timeoutMs,
+    DEFAULT_CAPTURE_FOREGROUND_WINDOW_TIMEOUT_MS
+  );
+  const result = childProcessApi.spawnSync('powershell.exe', [
     '-NoProfile',
     '-NonInteractive',
     '-Command',
     buildCaptureForegroundWindowCommand()
   ], {
     encoding: 'utf8',
+    timeout: timeoutMs,
     windowsHide: true
   });
 
@@ -105,6 +130,7 @@ function restoreForegroundWindow(handle) {
 }
 
 module.exports = {
+  DEFAULT_CAPTURE_FOREGROUND_WINDOW_TIMEOUT_MS: DEFAULT_CAPTURE_FOREGROUND_WINDOW_TIMEOUT_MS,
   buildCaptureForegroundWindowCommand: buildCaptureForegroundWindowCommand,
   buildRestoreForegroundWindowCommand: buildRestoreForegroundWindowCommand,
   canUseForegroundWindowApi: canUseForegroundWindowApi,

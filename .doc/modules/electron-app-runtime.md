@@ -221,7 +221,7 @@ sequenceDiagram
   else stop while start shortcut is pending
     Main->>Main: defer stop until start shortcut is sent
   else shortcut can proceed
-  Main->>Main: capture current foreground HWND
+  Main->>Main: capture current foreground HWND with bounded PowerShell timeout
   alt hidden or mini mode
     Main->>Window: move offscreen, set opacity 0, showInactive
     Main->>Main: wait activation delay
@@ -370,7 +370,7 @@ sequenceDiagram
 - transcript DOM 观察器现在优先于 network 候选结果完成。network monitor 成功后会先 schedule 一个 `5000ms` fallback；如果 DOM transcript 在这期间到达并进入 pipeline，就清掉 network fallback。这样可以避免 network response 先返回截断文本时过早 `transcript.finalized`。
 - transcribe monitor 会为每条 remote request 写 raw artifact，并在 `transcribe.started`、`transcribe.succeeded`、`transcribe.failed` 普通日志里带上 `remoteDebugDir`。packaged app 的目录是 `%APPDATA%\Dandelion\remote-debug\transcribe\<timestamp>\<requestId>\`；这里保存 CDP request/response events、request post data、response body、解析出的 transcript、DOM snapshot、recorder probe snapshot、app recording 和 replacement decision。
 - Windows 粘贴使用 PowerShell `System.Windows.Forms.SendKeys` 发出 `Ctrl+V`。如果目标应用或游戏使用管理员权限、独占输入或屏蔽模拟按键，可能需要让本 app 以相同权限运行。
-- 为了让 ChatGPT 页面收到网页快捷键，app 会在触发时 focus 内嵌 `WebContents`，然后通过 Win32 `SetForegroundWindow` 尝试恢复之前的前台窗口。`hidden` 和 `mini` 模式下窗口会先移到屏幕外、设为完全透明并使用 `showInactive` 激活，等待 `220ms` 后再发送快捷键，发送后立刻恢复隐藏，所以正常听写不会把 ChatGPT 窗口闪到屏幕上。ChatGPT 主窗口设置了 `webPreferences.backgroundThrottling=false`，避免隐藏/mini 模式下 `MediaRecorder` 长录音被 Chromium 后台节流截短。某些管理员权限窗口、独占全屏游戏或输入保护软件可能拒绝恢复焦点。
+- 为了让 ChatGPT 页面收到网页快捷键，app 会在触发时 focus 内嵌 `WebContents`，然后通过 Win32 `SetForegroundWindow` 尝试恢复之前的前台窗口。触发快捷键时会先用 PowerShell 读取当前前台 HWND，这个同步调用有 `750ms` 硬 timeout；超时后本轮继续发送 start/stop，只是跳过后续焦点恢复。`hidden` 和 `mini` 模式下窗口会先移到屏幕外、设为完全透明并使用 `showInactive` 激活，等待 `220ms` 后再发送快捷键，发送后立刻恢复隐藏，所以正常听写不会把 ChatGPT 窗口闪到屏幕上。ChatGPT 主窗口设置了 `webPreferences.backgroundThrottling=false`，避免隐藏/mini 模式下 `MediaRecorder` 长录音被 Chromium 后台节流截短。某些管理员权限窗口、独占全屏游戏或输入保护软件可能拒绝恢复焦点。
 - 开始听写会先通过页面脚本安装 recorder probe；如果 `transcribe.replaceUploadWithAppRecording=true`，还会启动 app 自己的页面侧 `MediaRecorder`，然后清空 ChatGPT 当前输入栏。recorder probe 最多等待 `1000ms`，app recorder start 最多等待 `2000ms`，超时后继续发送 start。Windows `SystemSounds.Asterisk` 和 mini overlay listening 状态会在网页快捷键实际发送后触发。之后 session 会等待 ChatGPT trusted `media` permission request；如果短时间内没有看到这个网页端开始信号，会自动重试一次 start。
 - 结束听写只有在 session 处于 `listening` 时才会向网页发送 stop；否则会 `skipSend`，避免同一个 `Ctrl+Shift+D` toggle 反向启动网页听写。stop 后会把 overlay 切到 `processing`，并按本轮听写时长启动线性 request timeout：默认 `15s + listeningDuration`。这样 `30s` 听写会等待 `45s`，`61s` 听写会等待约 `76.0s`，`86s` 听写会等待约 `100.6s`，`113s` 听写会等待约 `128.1s`。这个 timeout 只判断有没有看到 transcribe request。一旦看到 request，就清理 timeout，并继续等待 network response、DOM fallback、用户取消或明确失败。network response 只有在当前 session 已经进入 `waiting_response`，且 `requestId` 与本轮观察到的 transcribe request 一致时才会成为 fallback 候选；DOM fallback 也只会在 stop 之后的 `processing / waiting_response` 阶段生效。完成后切到 `success`，显示 `√` 和最终文本；没有 request、transcribe 失败或 pipeline 失败时切到 `error`，显示可选择、可复制的错误文本。
 - 开启 upload replacement 后，stop 会停止 app recorder 并导出 `webm`。ChatGPT transcribe request 在 request stage 被 CDP Fetch pause；如果 app recording 可用，monitor 替换 multipart `name="file"` part 并继续 request；如果不可用或 request body 无法识别，会写 `request-replacement-decision.json` 后放行原始 request。

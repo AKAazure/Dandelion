@@ -20,6 +20,10 @@ const {
 
 const { createAppLogger } = require('./appLogger');
 const { createAppIcon, resolveAppIconPath } = require('./appIcon');
+const {
+  installAppRuntimeDiagnostics,
+  installWindowRuntimeDiagnostics
+} = require('./runtimeDiagnostics');
 const { createChatGptShortcutBridge } = require('../shortcut/chatgptShortcutBridge');
 const { clearChatGptInput } = require('./chatgptInput');
 const { loadAppConfig } = require('./appConfig');
@@ -809,6 +813,11 @@ function createMiniOverlayWindow() {
     appIconPath,
     config.sessionPartition
   ));
+  installWindowRuntimeDiagnostics({
+    browserWindow: miniOverlayWindow,
+    label: 'mini-overlay',
+    logger: logger
+  });
   miniOverlayWindow.on('closed', function onMiniOverlayClosed() {
     logger.debug('mini_overlay.closed');
     miniOverlayWindow = null;
@@ -936,6 +945,11 @@ function createMainWindow() {
 
   windowOptions.webPreferences.partition = config.sessionPartition;
   mainWindow = new BrowserWindow(windowOptions);
+  installWindowRuntimeDiagnostics({
+    browserWindow: mainWindow,
+    label: 'chatgpt',
+    logger: logger
+  });
 
   mainWindow.webContents.setWindowOpenHandler(openExternalNavigation);
   mainWindow.webContents.on('did-navigate', function onNavigate(_event, url) {
@@ -1457,6 +1471,10 @@ function boot() {
     transcribe: config.transcribe,
     transcriptStableMs: config.transcriptStableMs,
     userDataDir: config.userDataDir
+  });
+  installAppRuntimeDiagnostics({
+    app: app,
+    logger: logger
   });
   if (typeof app.setAppUserModelId === 'function') {
     app.setAppUserModelId('dandelion');

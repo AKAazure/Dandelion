@@ -17,6 +17,7 @@ const testModules = [
   './miniOverlayWindow.test',
   './miniOverlayState.test',
   './permissions.test',
+  './runtimeDiagnostics.test',
   './shortcutWindowActivation.test',
   './systemSound.test',
   './windowModes.test',
